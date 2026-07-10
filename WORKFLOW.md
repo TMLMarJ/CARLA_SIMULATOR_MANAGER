@@ -13,3 +13,24 @@
 11. Configuration saving and reading.
 12. Visual improvement and redesign.
 13. Documentation.
+
+
+Do dodania:
+
+DONE: Zakładki np, actors, world. maps, simulation parameters, weather
+
+DONE: Wybór świata
+
+WIP: Pogoda
+
+NEXT: Lista aktorów 
+
+TODO:
+1. Zapis w lepszej kolejności
+2. Każdy actor kat pojazd autopilot
+3. TRAFFIC manger zapoznać się
+4. Na koniec statystyki
+5. od razu jeśli zapis to z sensorami 
+6. Pygame na koniec
+
+

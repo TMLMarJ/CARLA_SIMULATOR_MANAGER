@@ -11,6 +11,9 @@ class DataStorage:
         self.blueprint_lib = None
         self.world = None
         self.ghost_data = None
+        self.world_lib = None
+        self.actual_weather_data = {}
+        self.weather_presets = {}
 
     def add_actor(self, actor: carla.Actor):
         self.actors_db.add_actor(actor)
