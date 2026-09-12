@@ -1,4 +1,5 @@
 from typing import Dict
+import time
 
 import carla
 
@@ -40,4 +41,16 @@ def parse_weather_to_carla(weather: Dict[str, object]) -> carla.WeatherParameter
         if hasattr(carla_weather, key):
             setattr(carla_weather, key, value)
     return carla_weather
+
+def wait_and_try(condition, timeout=10, interval=1):
+    start = time.time()
+    while time.time() - start < timeout:
+        if condition():
+            return True
+        time.sleep(interval)
+    return False
+
+def return_data_from_transform(transform: carla.Transform):
+    return transform.location.x, transform.location.y, transform.location.z, transform.rotation.yaw, transform.rotation.pitch, transform.rotation.roll
+
 

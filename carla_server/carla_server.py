@@ -10,14 +10,15 @@ class CarlaController:
         self.database = database
         self.thread = None
         self.data_ready = False
+        self.client = None
 
     def start(self):
         self.thread = threading.Thread(target=self.run, daemon=True)
         self.thread.start()
 
     def run(self):
-        client = carla.Client('localhost', 2000)
-        world = client.get_world()
+        self.client = carla.Client('localhost', 2000)
+        world = self.client.get_world()
 
 
         settings = world.get_settings()
@@ -36,7 +37,7 @@ class CarlaController:
         }
         self.database.weather_presets = weather_presets
         self.database.actual_weather_data = weather_data
-        self.database.world_lib = client.get_available_maps()
+        self.database.world_lib = self.client.get_available_maps()
         while self.running:
             if not self.command_queue.empty():
                 cmd, data = self.command_queue.get()
@@ -81,32 +82,32 @@ class CarlaController:
                         self.database.ghost_data = actor.id
 
                 if cmd == "change_world":
-                    client.set_timeout(30.0)
+                    self.client.set_timeout(30.0)
 
                     try:
-                        world = client.load_world(data)
+                        world = self.client.load_world(data)
                     except RuntimeError as e:
                         print("Timeout during world loading")
-                        world = client.get_world()
+                        world = self.client.get_world()
 
                         if data in world.get_map().name:
                             print("Map changed successfully")
                         else:
                             raise e
 
-                    client = carla.Client('localhost', 2000)
-                    client.set_timeout(5.0)
-                    world = client.get_world()
+                    self.client = carla.Client('localhost', 2000)
+                    self.client.set_timeout(5.0)
+                    world = self.client.get_world()
                     blueprint_library = world.get_blueprint_library()
                     self.database.blueprint_lib = blueprint_library
                     self.database.world = world
-                    self.database.world_lib = client.get_available_maps()
+                    self.database.world_lib = self.client.get_available_maps()
                     weather = world.get_weather()
                     weather_data = parse_weather_to_dict(weather)
                     self.database.actual_weather_data = weather_data
 
                 if cmd == "change_weather":
-                    world = client.get_world()
+                    world = self.client.get_world()
                     world.set_weather(data)
 
 
