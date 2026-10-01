@@ -7,16 +7,13 @@ class Actors:
         self.actors: Dict[int, carla.Actor] = {}
         self.actors_db: Dict[int, ActorInfo] = {}
 
-    def add_actor(self, actor: carla.Actor):
+    def add_actor(self, actor: carla.Actor, name: str):
         self.actors[actor.id] = actor
-
-    def add_actor_info(self, actor: carla.Actor, user_id: int, user_name: str):
-        self.actors_db[actor.id] = ActorInfo(actor, user_id, user_name)
+        self.actors_db[actor.id] = ActorInfo(actor, name)
 
 
 class ActorInfo:
-    def __init__(self, actor: carla.Actor, user_id: int, user_name: str):
-        self.user_id = user_id
+    def __init__(self, actor: carla.Actor, user_name: str):
         self.user_name = user_name
         self.carla_id = actor.id
         self.type_id = actor.type_id
@@ -32,7 +29,7 @@ class ActorInfo:
         self.world = actor.get_world()
 
     def get_actor_info(self):
-        actor_info = {"user_id": self.user_id,
+        actor_info = {
                       "user_name": self.user_name,
                       "carla_id": self.carla_id,
                       "type_id": self.type_id,
@@ -50,7 +47,7 @@ class ActorInfo:
 
     def __str__(self):
         string = ""
-        string += f"Actor Info Object defined as {self.user_id}::{self.user_name}\n"
+        string += f"Actor Info Object defined as {self.user_name}\n"
         string += f"Carla ID: {self.carla_id}\n"
         string += f"Type ID: {self.type_id}\n"
         string += f"Is Active: {self.is_active}\n"

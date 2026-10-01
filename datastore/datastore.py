@@ -11,12 +11,18 @@ class DataStorage:
         self.blueprint_lib = None
         self.world = None
         self.ghost_data = None
+        self.ghost_camera = None
+        self.ghost_spawned = False
+        self.ghost_physic = None
         self.world_lib = None
         self.actual_weather_data = None
         self.weather_presets = None
+        self.world_changed = False
+        self.available_spawn_points = []
+        self.spawned_actor_id = None
 
-    def add_actor(self, actor: carla.Actor):
-        self.actors_db.add_actor(actor)
+    def add_actor(self, actor: carla.Actor, name: str):
+        self.actors_db.add_actor(actor, name)
 
     def data_ready(self):
         return (

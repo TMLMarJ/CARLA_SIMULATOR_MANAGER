@@ -7,23 +7,26 @@ import messagebox
 
 class CustomWorldAndWeatherFrame(tk.Frame):
     def __init__(self, parent, controller):
-        print("XXXX")
         super().__init__(parent)
         self.controller = controller
         self.database = controller.database
         self.carla = controller.carla
-        self.default_color = "#D2F7FA"
-        style = ttk.Style()
-        style.configure("TFrame", background=self.default_color)
+        self.default_color = "#F7E7D3"
+        self.panel_color = "#F1D0A3"
+        self.accent_color = "#C96D3C"
+        self.text_color = "#4A2E1D"
+        self.subtle_color = "#E7B36C"
 
         # World & Weather Tab
         # World Config
         self.world_control_frame = ttk.Frame(self, style="new.TFrame")
-        self.world_control_frame.pack(expand=1, fill="both")
+        self.world_control_frame.pack(expand=1, fill="both", padx=18, pady=(18, 12))
         self.world_control_frame_selection = ttk.Frame(self.world_control_frame, style="new.TFrame")
         self.world_control_frame_image = ttk.Frame(self.world_control_frame, style="new.TFrame")
-        self.world_control_frame_selection.grid(row=0, column=0)
-        self.world_control_frame_image.grid(row=0, column=1)
+        self.world_control_frame_selection.grid(row=0, column=0, sticky="n", padx=(18, 12), pady=(12, 0))
+        self.world_control_frame_image.grid(row=0, column=1, sticky="n", padx=(12, 18), pady=(12, 0))
+        self.world_control_frame.grid_columnconfigure(0, weight=1)
+        self.world_control_frame.grid_columnconfigure(1, weight=2)
         self.map_display = None
         self.display = None
         self.disp_label = None
@@ -31,17 +34,17 @@ class CustomWorldAndWeatherFrame(tk.Frame):
 
         # Weather Config
         self.weather_control_frame = ttk.Frame(self, style="new.TFrame")
-        self.weather_control_frame.pack(expand=1, fill="both")
+        self.weather_control_frame.pack(expand=1, fill="both", padx=18, pady=(6, 18))
         self._weather_variables_definition()
         self._weather_control_frame_setup()
 
     def _world_control_frame_setup(self):
         heading = tk.Label(self.world_control_frame_selection, text="World Control", bg=self.default_color,
-                           font=("Arial", 18))
-        heading.grid(row=0, column=0, sticky="NW")
+                           fg=self.text_color, font=("Arial", 18, "bold"))
+        heading.grid(row=0, column=0, sticky="NW", pady=(0, 10))
 
         heading2 = tk.Label(self.world_control_frame_selection, text="Map select:", bg=self.default_color,
-                            font=("Arial", 12))
+                            fg=self.text_color, font=("Arial", 12, "bold"))
         heading2.grid(row=1, column=0, sticky="W")
         self.selected_map = tk.StringVar()
         select_map_combobox = ttk.Combobox(self.world_control_frame_selection, width=27,
@@ -57,8 +60,10 @@ class CustomWorldAndWeatherFrame(tk.Frame):
 
         self.map_display = Image.open("images/maps/" + self.selected_map.get() + ".png")
         self.display = ImageTk.PhotoImage(self.map_display)
-        self.disp_label = tk.Label(self.world_control_frame_image, image=self.display)
-        self.disp_label.grid(row=0, column=0, pady=10, padx=20)
+        self.disp_label = tk.Label(self.world_control_frame_image, image=self.display, bg=self.panel_color,
+                                   highlightthickness=0)
+        self.disp_label.grid(row=0, column=0, pady=10, padx=10, sticky="nsew")
+        self.world_control_frame_image.grid_columnconfigure(0, weight=1)
 
     def _weather_variables_definition(self):
         weather = self.database.actual_weather_data
@@ -118,21 +123,21 @@ class CustomWorldAndWeatherFrame(tk.Frame):
         row = 0
         col = 0
         heading = tk.Label(self.weather_control_frame, text="Weather Control", bg=self.default_color,
-                           font=("Arial", 18))
-        heading.grid(row=row, column=col, sticky="NW")
+                           fg=self.text_color, font=("Arial", 18, "bold"))
+        heading.grid(row=row, column=col, sticky="NW", padx=18, pady=(18, 8))
 
         # ===================================== Weather preset ========================================
         row = 1
         label_weather_presets = tk.Label(self.weather_control_frame, text="Custom Presets", bg=self.default_color,
-                                         font=("Arial", 12))
-        label_weather_presets.grid(row=row, column=col, sticky="W")
+                                         fg=self.text_color, font=("Arial", 12, "bold"))
+        label_weather_presets.grid(row=row, column=col, sticky="W", padx=18)
         self.selected_weather_preset = tk.StringVar()
         row += 1
         select_weather_preset_combobox = ttk.Combobox(self.weather_control_frame, width=27,
                                                       textvariable=self.selected_weather_preset)
         select_weather_preset_combobox["values"] = list(self.weather_presets_data.keys())[:-1]
         select_weather_preset_combobox.current(0)
-        select_weather_preset_combobox.grid(row=row, column=col, sticky="W")
+        select_weather_preset_combobox.grid(row=row, column=col, sticky="W", padx=18)
         select_weather_preset_combobox.bind("<<ComboboxSelected>>", self.update_weather_variables)
 
         # ===================================== Cloudiness =====================================
@@ -327,7 +332,7 @@ class CustomWorldAndWeatherFrame(tk.Frame):
     def _apply_world(self):
         self.carla.change_world(self.selected_map.get())
         is_changed = wait_and_try(
-            lambda: str(self.database.world.get_map().name).split("/")[-1] == self.selected_map.get(),
+            lambda: self.database.world_changed == True,
         )
         if is_changed:
             self.reset_weather()

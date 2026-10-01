@@ -2,8 +2,11 @@ import time
 import tkinter as tk
 from tkinter import ttk
 from PIL import Image, ImageTk
+from pygments.lexers import blueprint
+
 from utilities.functions import filter_carla_id_by_type, return_data_from_transform, wait_and_try
 from gui_contents.vehicle_spawn_preview import VehiclePreviewFrame, VehiclePreview
+from gui_contents.ActorEditView import EntityEditWindow
 import messagebox
 import carla
 import numpy as np
@@ -16,22 +19,35 @@ class CustomVehicleFrame(tk.Frame):
         self.database = controller.database
         self.carla = controller.carla
 
-        self.default_color = "#D2F7FA"
-        style = ttk.Style()
-        style.configure("TFrame", background=self.default_color)
-        self.vehicle_preview = VehiclePreview(self.database.world)
+        self.default_color = "#F7E7D3"
+        self.panel_color = "#F1D0A3"
+        self.accent_color = "#C96D3C"
+        self.text_color = "#4A2E1D"
+        self.subtle_color = "#E7B36C"
+
+        self.vehicle_preview = VehiclePreview(self.database, controller)
 
         # Vehicle Tab
         self.vehicle_control_frame = ttk.Frame(self, style="new.TFrame")
-        self.vehicle_control_frame.pack(expand=1, fill="both")
+        self.vehicle_control_frame.pack(expand=1, fill="both", padx=18, pady=(12, 18))
+        self.vehicle_control_frame.grid_columnconfigure(0, weight=1)
+        self.vehicle_control_frame.grid_rowconfigure(0, weight=1)
         self._vehicle_variables_definition()
         self._vehicle_frame_setup()
 
-    def spawn_ghost(self):
-        self.vehicle_preview.spawn()
+    def spawn_ghost(self, blueprint_id="vehicle.audi.a2", transform=None):
+        self.vehicle_preview.spawn(blueprint_id=blueprint_id, transform=transform)
         self.after(500, self.image_frame.update_image)
+        is_spawned = wait_and_try(
+            lambda: self.database.ghost_spawned == True
+        )
+        if is_spawned:
+            print("Ghost vehicle spawned successfully.")
+        else:
+            print("Failed to spawn ghost vehicle.")
 
     def _vehicle_variables_definition(self):
+        self.vehicle_name_var = tk.StringVar(value="Ghost Vehicle")
         self.selected_vehicle = tk.StringVar()
         self.selected_spawnpoint = {
             "x": 0,
@@ -41,12 +57,12 @@ class CustomVehicleFrame(tk.Frame):
             "pitch": 0,
             "roll": 0,
         }
-        self.x_position_var = tk.DoubleVar()
-        self.y_position_var = tk.DoubleVar()
-        self.z_position_var = tk.DoubleVar()
-        self.yaw_position_var = tk.DoubleVar()
-        self.pitch_position_var = tk.DoubleVar()
-        self.roll_position_var = tk.DoubleVar()
+        self.x_position_var = tk.DoubleVar(value=self.database.available_spawn_points[0].location.x if self.database.available_spawn_points else 0)
+        self.y_position_var = tk.DoubleVar(value=self.database.available_spawn_points[0].location.y if self.database.available_spawn_points else 0)
+        self.z_position_var = tk.DoubleVar(value=self.database.available_spawn_points[0].location.z if self.database.available_spawn_points else 0)
+        self.yaw_position_var = tk.DoubleVar(value=self.database.available_spawn_points[0].rotation.yaw if self.database.available_spawn_points else 0)
+        self.pitch_position_var = tk.DoubleVar(value=self.database.available_spawn_points[0].rotation.pitch if self.database.available_spawn_points else 0)
+        self.roll_position_var = tk.DoubleVar(value=self.database.available_spawn_points[0].rotation.roll if self.database.available_spawn_points else 0)
         self.selected_spawn_point = tk.StringVar()
 
         self.choose_class = tk.StringVar()
@@ -58,53 +74,85 @@ class CustomVehicleFrame(tk.Frame):
         upper_frame = ttk.Frame(self.vehicle_control_frame, style="new.TFrame")
         lower_frame = ttk.Frame(self.vehicle_control_frame, style="new.TFrame")
         upper_frame.pack(side="top", fill="x")
-        lower_frame.pack(side="bottom", fill="x")
+        lower_frame.pack(side="bottom", fill="both", expand=True)
+
+        upper_frame.grid_columnconfigure(0, weight=1)
+        upper_frame.grid_columnconfigure(1, weight=2)
+        lower_frame.grid_rowconfigure(0, weight=1)
 
         heading_frame = ttk.Frame(upper_frame, style="new.TFrame")
-        heading_frame.grid(row=0, column=0, sticky="nw")
+        heading_frame.grid(row=0, column=0, sticky="nw", padx=(20, 12), pady=(20, 12))
 
         self.image_frame = VehiclePreviewFrame(upper_frame, self.vehicle_preview)
-        self.image_frame.grid(row=0, column=1, sticky="ne", padx=20)
+        self.image_frame.grid(row=0, column=1, sticky="n", padx=(12, 20), pady=(20, 12))
 
         location_frame = ttk.Frame(upper_frame, style="new.TFrame")
-        location_frame.grid(row=1, column=0, sticky="nw", pady=20)
+        location_frame.grid(row=1, column=0, columnspan=2, sticky="ew", padx=20, pady=(10, 20))
 
         button_frame = ttk.Frame(upper_frame, style="new.TFrame")
-        button_frame.grid(row=1, column=1, sticky="ne",padx=20, pady=20)
+        button_frame.grid(row=1, column=1, sticky="n", padx=(0, 20), pady=(0, 20))
 
         # ================================= Heading ======================================
-        heading_label = tk.Label(heading_frame, text="Vehicles menu", bg=self.default_color,
-                           font=("Arial", 18))
-        heading_label.grid(row=0, column=0)
 
-        # Actor class selection
-        actor_class_combobox = ttk.Combobox(heading_frame, width=27, textvariable=self.choose_class)
+        heading_frame.grid_columnconfigure(0, weight=1)
+        heading_frame.grid_columnconfigure(1, weight=1)
+
+        heading_label = tk.Label(heading_frame, text="Vehicles menu", bg=self.default_color, fg=self.text_color, font=("Arial", 18, "bold"))
+        heading_label.grid( row=0, column=0, columnspan=2, sticky="w", pady=(0, 16))
+
+        # ================================= Vehicle name =================================
+
+        vehicle_name_label = ttk.Label(heading_frame, text="Vehicle Name", background=self.default_color, font=("Arial", 14, "bold"))
+        vehicle_name_label.grid( row=1, column=0, columnspan=2, sticky="w", pady=(0, 6))
+
+        vehicle_name_entry = ttk.Entry(heading_frame, textvariable=self.vehicle_name_var)
+        vehicle_name_entry.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 14))
+
+        # ================================= Class + Model =================================
+
+        class_frame = ttk.Frame(heading_frame, style="new.TFrame")
+        class_frame.grid(row=3, column=0, sticky="ew", padx=(0, 6))
+
+        model_frame = ttk.Frame(heading_frame, style="new.TFrame")
+        model_frame.grid(row=3, column=1, sticky="ew", padx=(6, 0))
+
+        class_frame.grid_columnconfigure(0, weight=1)
+        model_frame.grid_columnconfigure(0, weight=1)
+
+        # Class
+        class_label = ttk.Label(class_frame, text="Class", background=self.default_color, font=("Arial", 11, "bold"))
+        class_label.grid(row=0, column=0, sticky="w", pady=(0, 5))
+
+        actor_class_combobox = ttk.Combobox(class_frame, textvariable=self.choose_class, state="readonly")
         actor_class_combobox["values"] = vehicle_classes
         actor_class_combobox.current(0)
         actor_class_combobox.bind("<<ComboboxSelected>>", self._update_model)
+        actor_class_combobox.grid(row=1, column=0, sticky="ew")
 
-        # Actor selection by class
-        self.actor_model = filter_carla_id_by_type("vehicle", self.choose_class.get().lower(),
-                                                         self.database.blueprint_lib)
-        self.actor_model_combobox = ttk.Combobox(heading_frame, width=27, textvariable=self.choose_model)
+        # Model
+        model_label = ttk.Label(model_frame, text="Model", background=self.default_color, font=("Arial", 11, "bold"))
+        model_label.grid(row=0, column=0, sticky="w", pady=(0, 5))
+
+        self.actor_model = filter_carla_id_by_type("vehicle", self.choose_class.get().lower(), self.database.blueprint_lib)
+
+        self.actor_model_combobox = ttk.Combobox(model_frame, textvariable=self.choose_model, state="readonly")
         self.actor_model_combobox["values"] = list(self.actor_model.keys())
         self.actor_model_combobox.current(0)
         self.actor_model_combobox.bind("<<ComboboxSelected>>", self._on_model_change)
+        self.actor_model_combobox.grid(row=1, column=0, sticky="ew")
 
-        actor_class_combobox.grid(row=1, column=0)
-        self.actor_model_combobox.grid(row=2, column=0)
+        # ================================= Spawn point =================================
 
-        self.available_spawn_points = self.database.world.get_map().get_spawn_points()
-        self.available_spawn_points = [f"{i}:{point}" for i, point in enumerate(self.available_spawn_points)]
-        spawn_point_label = ttk.Label(heading_frame, text="Spawn Points", background=self.default_color,
-                                      font=("Arial", 16))
-        spawn_point_label.grid(row=3, column=0, pady=10)
+        spawn_point_label = ttk.Label(heading_frame, text="Spawn Point", background=self.default_color, font=("Arial", 14, "bold"))
+        spawn_point_label.grid(row=4, column=0, columnspan=2, sticky="w", pady=(14, 6))
 
-        self.combobox_spawn_points = ttk.Combobox(heading_frame, width=27, textvariable=self.selected_spawn_point)
+        self.available_spawn_points = [f"{i}: {point}" for i, point in enumerate(self.database.available_spawn_points)]
+
+        self.combobox_spawn_points = ttk.Combobox(heading_frame, textvariable=self.selected_spawn_point, state="readonly")
         self.combobox_spawn_points["values"] = self.available_spawn_points
         self.combobox_spawn_points.current(0)
         self.combobox_spawn_points.bind("<<ComboboxSelected>>", self._update_location_from_spawn_point)
-        self.combobox_spawn_points.grid(row=4, column=0)
+        self.combobox_spawn_points.grid(row=5, column=0, columnspan=2, sticky="ew")
 
         #==================================== Location ===================================
         position_frame = ttk.Frame(location_frame, style="new.TFrame")
@@ -122,13 +170,13 @@ class CustomVehicleFrame(tk.Frame):
 
         y_label = ttk.Label(position_frame, text="Y - position", background=self.default_color)
         y_label.grid(row=3, column=0, sticky="nw")
-        y_spinbox = tk.Spinbox(position_frame, from_=1e9, to=1e9, increment=0.01,
+        y_spinbox = tk.Spinbox(position_frame, from_=-1e9, to=1e9, increment=0.01,
                                textvariable=self.y_position_var)
         y_spinbox.grid(row=4, column=0)
 
         z_label = ttk.Label(position_frame, text="Z - position", background=self.default_color)
         z_label.grid(row=5, column=0, sticky="nw")
-        z_spinbox = tk.Spinbox(position_frame, from_=1e9, to=1e9, increment=0.01,
+        z_spinbox = tk.Spinbox(position_frame, from_=-1e9, to=1e9, increment=0.01,
                                textvariable=self.z_position_var)
         z_spinbox.grid(row=6, column=0)
 
@@ -141,21 +189,38 @@ class CustomVehicleFrame(tk.Frame):
 
         yaw_label = ttk.Label(rotation_frame, text="Yaw", background=self.default_color)
         yaw_label.grid(row=1, column=0, sticky="nw")
-        yaw_spinbox = tk.Spinbox(rotation_frame, from_=1e9, to=1e9, increment=0.01,
+        yaw_spinbox = tk.Spinbox(rotation_frame, from_=-1e9, to=1e9, increment=0.01,
                                  textvariable=self.yaw_position_var)
         yaw_spinbox.grid(row=2, column=0)
 
         pitch_label = ttk.Label(rotation_frame, text="Pitch", background=self.default_color)
         pitch_label.grid(row=3, column=0, sticky="nw")
-        pitch_spinbox = tk.Spinbox(rotation_frame, from_=1e9, to=1e9, increment=0.01,
+        pitch_spinbox = tk.Spinbox(rotation_frame, from_=-1e9, to=1e9, increment=0.01,
                                    textvariable=self.pitch_position_var)
         pitch_spinbox.grid(row=4, column=0)
 
         roll_label = ttk.Label(rotation_frame, text="Roll", background=self.default_color)
         roll_label.grid(row=5, column=0, sticky="nw")
-        roll_spinbox = tk.Spinbox(rotation_frame, from_=1e9, to=1e9,increment=0.01,
+        roll_spinbox = tk.Spinbox(rotation_frame, from_=-1e9, to=1e9,increment=0.01,
                                   textvariable=self.roll_position_var)
         roll_spinbox.grid(row=6, column=0)
+
+        # ==================================== Table ===================================
+        self.vehicle_table = VehicleTable(lower_frame, self.controller)
+        self.vehicle_table.pack(expand=1, fill="both", padx=20, pady=(10, 20))
+        self.vehicle_table.tree.bind("<Double-1>", self.set_variables_from_table)
+
+        #==================================== Buttons ===================================
+        spawn_button = ttk.Button(button_frame, text="Spawn Vehicle", command=self.spawn_vehicle, width=18)
+        spawn_button.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        remove_button = ttk.Button(button_frame, text="Remove", command=self.remove_vehicle, width=18)
+        remove_button.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        edit_button = ttk.Button(button_frame, text="Edit", command=self.edit_vehicle, width=18)
+        edit_button.grid(row=2, column=0, sticky="ew", pady=(0, 8))
+        update_button = ttk.Button(button_frame, text="Update", command=self.update_vehicle, width=18)
+        update_button.grid(row=3, column=0, sticky="ew", pady=(0, 8))
+        attach_sensor_button = ttk.Button(button_frame, text="Attach Sensor", command=self.attach_sensor, width=18)
+        attach_sensor_button.grid(row=4, column=0, pady=(0, 8), sticky="ew")
 
     def _update_model(self, event):
         self.actor_model = filter_carla_id_by_type("vehicle", self.choose_class.get().lower(),
@@ -163,6 +228,8 @@ class CustomVehicleFrame(tk.Frame):
         self.actor_model_combobox["values"] = list(self.actor_model.keys())
         self.actor_model_combobox.current(0)
         self.image_frame.update_image()
+
+
 
     def _update_location_from_spawn_point(self, event):
         spawn_point_num = int(str(self.selected_spawn_point.get()).split(":")[0])
@@ -183,13 +250,12 @@ class CustomVehicleFrame(tk.Frame):
         self.pitch_position_var.set(pitch)
         self.roll_position_var.set(roll)
 
-        selected_model = self.actor_model[self.actor_model_combobox.get()]
-        self.vehicle_preview.destroy()
-        self.vehicle_preview.spawn(blueprint_id=selected_model, transform=transform)
-        self.after(500, self.image_frame.update_image)
+        if self.vehicle_preview:
+            self.vehicle_preview.set_transform(transform)
+            self.after(500, self.image_frame.update_image)
 
     def update_spawn_point(self):
-        self.combobox_spawn_points["values"] = [f"{i}:{point}" for i, point in enumerate(self.database.world.get_map().get_spawn_points())]
+        self.combobox_spawn_points["values"] = [f"{i}:{point}" for i, point in enumerate(self.database.available_spawn_points)]
         self.combobox_spawn_points.current(0)
 
     def destroy_ghost(self):
@@ -200,7 +266,230 @@ class CustomVehicleFrame(tk.Frame):
         selected_model = self.actor_model[self.actor_model_combobox.get()]
         if self.vehicle_preview:
             transform = self.vehicle_preview.get_transform()
-            self.vehicle_preview.destroy()
-            self.vehicle_preview.spawn(blueprint_id=selected_model, transform=transform)
+            self.destroy_ghost()
+            self.spawn_ghost(blueprint_id=selected_model, transform=transform)
             self.after(500, self.image_frame.update_image)
 
+    def get_vehicle_info(self):
+        vehicle_name = self.vehicle_name_var.get()
+        x_pos = self.x_position_var.get()
+        y_pos = self.y_position_var.get()
+        z_pos = self.z_position_var.get()
+        yaw_pos = self.yaw_position_var.get()
+        pitch_pos = self.pitch_position_var.get()
+        roll_pos = self.roll_position_var.get()
+        carla_id = self.database.ghost_data.id if self.database.ghost_data is not None else None
+        vehicle_info = {
+            "name": vehicle_name,
+            "carla_id": carla_id,
+            "type_id": self.choose_class.get()+":"+self.choose_model.get(),
+            "location": f"({x_pos:.2f}, {y_pos:.2f}, {z_pos:.2f})" if self.database.ghost_data is not None else None,
+            "rotation": f"({pitch_pos:.2f}, {yaw_pos:.2f}, {roll_pos:.2f})" if self.database.ghost_data is not None else None,
+            "sensors": "",  # TODO: Implement sensor information retrieval when the sensor management is implemented
+            "is_active": ("Active" if self.database.ghost_data.is_alive else "Inactive") if self.database.ghost_data is not None else "None"
+        }
+        return vehicle_info
+
+    def spawn_vehicle(self):
+        if self.database.ghost_data is not None:
+            vehicle_name = self.vehicle_name_var.get()
+            transform = carla.Transform(
+                carla.Location(
+                    x=self.x_position_var.get(),
+                    y=self.y_position_var.get(),
+                    z=self.z_position_var.get()
+                ),
+                carla.Rotation(
+                    pitch=self.pitch_position_var.get(),
+                    yaw=self.yaw_position_var.get(),
+                    roll=self.roll_position_var.get()
+                )
+            )
+            sensors = "" #TODO: Implement sensor information retrieval when the sensor management is implemented
+            actor_model = filter_carla_id_by_type("vehicle", self.choose_class.get().lower(),
+                                                       self.database.blueprint_lib)
+            data = {
+                "name": vehicle_name,
+                "transform": transform,
+                "sensors": sensors,
+                "blueprint_id": actor_model[self.choose_model.get()]}
+
+            vehicle_data = self.get_vehicle_info()
+            self.destroy_ghost()
+            self.controller.carla.spawn_actor(data)
+            self.reset_tab()
+            try:
+                is_changed = wait_and_try(
+                    lambda: self.database.spawned_actor_id is not None
+                )
+                if is_changed:
+                    veh_id = self.database.actors_db.actors[self.database.spawned_actor_id].id
+                    vehicle_data["carla_id"] = veh_id
+                    self.vehicle_table.add_vehicle_to_table(vehicle_data)
+                    self.database.spawned_actor_id = None
+            except KeyError:
+                veh_id = None
+                print("Database update failed. Vehicle not found in database.")
+            self.spawn_ghost()
+
+
+
+
+
+    def remove_vehicle(self):
+        selected_vehicle = self.vehicle_table.tree.selection()
+        if selected_vehicle:
+            vehicle_id = self.vehicle_table.tree.item(selected_vehicle)["values"][1]
+            self.controller.carla.remove_actor(vehicle_id)
+            self.vehicle_table.tree.delete(selected_vehicle)
+
+    def edit_vehicle(self):
+        blueprint = self.actor_model[self.actor_model_combobox.get()]
+        top = EntityEditWindow(self, blueprint, None, "vehicle", self.database.blueprint_lib)
+
+    def reset_tab(self):
+        self.vehicle_name_var.set("Ghost Vehicle")
+        self.choose_class.set("Car")
+        self._update_model(None)
+        self.x_position_var.set(self.database.available_spawn_points[0].location.x if self.database.available_spawn_points else 0)
+        self.y_position_var.set(self.database.available_spawn_points[0].location.y if self.database.available_spawn_points else 0)
+        self.z_position_var.set(self.database.available_spawn_points[0].location.z if self.database.available_spawn_points else 0)
+        self.yaw_position_var.set(self.database.available_spawn_points[0].rotation.yaw if self.database.available_spawn_points else 0)
+        self.pitch_position_var.set(self.database.available_spawn_points[0].rotation.pitch if self.database.available_spawn_points else 0)
+        self.roll_position_var.set(self.database.available_spawn_points[0].rotation.roll if self.database.available_spawn_points else 0)
+        self.combobox_spawn_points.current(0)
+
+    def update_vehicle(self):
+        self.remove_vehicle()
+        self.spawn_vehicle()
+
+    def attach_sensor(self):
+        pass
+
+    def set_variables_from_table(self, event):
+        selected_vehicle = self.vehicle_table.tree.selection()
+        if selected_vehicle:
+            vehicle_data = self.vehicle_table.tree.item(selected_vehicle)["values"]
+            self.vehicle_name_var.set(vehicle_data[0])
+            self.choose_class.set(vehicle_data[2].split(":")[0])
+            self.choose_model.set(vehicle_data[2].split(":")[1])
+            x_location = float(vehicle_data[3].strip("{(())}").split(",")[0])
+            y_location = float(vehicle_data[3].strip("{(())}").split(",")[1])
+            z_location = float(vehicle_data[3].strip("{(())}").split(",")[2])
+            yaw_rotation = float(vehicle_data[4].strip("{(())}").split(",")[1])
+            pitch_rotation = float(vehicle_data[4].strip("{(())}").split(",")[0])
+            roll_rotation = float(vehicle_data[4].strip("{(())}").split(",")[2])
+            self.x_position_var.set(x_location)
+            self.y_position_var.set(y_location)
+            self.z_position_var.set(z_location)
+            self.yaw_position_var.set(yaw_rotation)
+            self.pitch_position_var.set(pitch_rotation)
+            self.roll_position_var.set(roll_rotation)
+            self._update_model(None)
+
+
+
+class VehicleTable(ttk.Frame):
+    def __init__(self, parent, controller):
+        super().__init__(parent, style="new.TFrame")
+        self.controller = controller
+        self.database = controller.database
+        self.carla = controller.carla
+
+        self.default_color = "#F7E7D3"
+        self.panel_color = "#F1D0A3"
+        self.accent_color = "#C96D3C"
+        self.text_color = "#4A2E1D"
+        self.subtle_color = "#E7B36C"
+
+        title = ttk.Label(
+            self,
+            text="Vehicles",
+            style="TLabel",
+            font=("Arial", 18, "bold")
+        )
+        title.pack(pady=(10, 8), fill="x")
+
+        columns = (
+            "Vehicle Name",
+            "ID",
+            "Model",
+            "Location",
+            "Rotation",
+            "Sensors",
+            "Status"
+        )
+
+        self.tree = ttk.Treeview(
+            self,
+            columns=columns,
+            show="headings",
+            height=18,
+            style="Treeview",
+        )
+
+        self.tree.heading("Vehicle Name", text="Vehicle Name")
+        self.tree.heading("ID", text="ID")
+        self.tree.heading("Model", text="Type ID")
+        self.tree.heading("Location", text="Location")
+        self.tree.heading("Rotation", text="Rotation")
+        self.tree.heading("Sensors", text="Sensors")
+        self.tree.heading("Status", text="Status")
+
+        self.tree.column("Vehicle Name", width=240, minwidth=180, anchor="center")
+        self.tree.column("ID", width=40, minwidth=40, anchor="center")
+        self.tree.column("Model", width=240, minwidth=220, anchor="center")
+        self.tree.column("Location", width=170, minwidth=140, anchor="center")
+        self.tree.column("Rotation", width=170, minwidth=140, anchor="center")
+        self.tree.column("Sensors", width=80, minwidth=120, anchor="center")
+        self.tree.column("Status", width=80, minwidth=120, anchor="center")
+
+        scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scrollbar.set)
+
+        self.tree.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+    def add_vehicle_to_table(self, vehicle_info):
+        name = vehicle_info["name"]
+        vehicle_id = vehicle_info["carla_id"]
+        model = vehicle_info["type_id"]
+        location = f"({vehicle_info['location']})",
+        rotation = f"({vehicle_info['rotation']})",
+        sensors = ""    #TODO: Implement sensor information retrieval when the sensor management is implemented
+        status = vehicle_info["is_active"]
+        self.tree.insert("", "end", values=(name, vehicle_id, model, location, rotation, sensors, status))
+
+    def remove_vehicle_from_table(self, vehicle_info):
+        vehicle_id = vehicle_info["carla_id"]
+        for item in self.tree.get_children():
+            if self.tree.item(item)["values"][1] == vehicle_id:
+                self.tree.delete(item)
+                break
+
+    def update_vehicle_in_table(self, vehicle_info):
+        vehicle_id = vehicle_info["carla_id"]
+        for item in self.tree.get_children():
+            if self.tree.item(item)["values"][1] == vehicle_id:
+                name = vehicle_info["name"]
+                model = vehicle_info["type_id"]
+                location = f"({vehicle_info['location']})",
+                rotation = f"({vehicle_info['rotation']})",
+                sensors = ""    #TODO: Implement sensor information retrieval when the sensor management is implemented
+                status = vehicle_info["is_active"]
+                self.tree.item(item, values=(name, vehicle_id, model, location, rotation, sensors, status))
+                break
+
+    def initialize_data(self):
+        for actor_id, actor_info in self.database.actors_db.actors_db.items():
+            if "vehicle" in actor_info.type_id:
+                vehicle_info = {
+                    "name": actor_info.user_name,
+                    "carla_id": actor_info.carla_id,
+                    "type_id": actor_info.type_id,
+                    "location": f"({actor_info.location.x:.2f}, {actor_info.location.y:.2f}, {actor_info.location.z:.2f})",
+                    "rotation": f"({actor_info.transform.rotation.pitch:.2f}, {actor_info.transform.rotation.yaw:.2f}, {actor_info.transform.rotation.roll:.2f})",
+                    "sensors": "",  # TODO: Implement sensor information retrieval when the sensor management is implemented
+                    "is_active": ("Active" if actor_info.is_alive else "Inactive")
+                }
+                self.add_vehicle_to_table(vehicle_info)
