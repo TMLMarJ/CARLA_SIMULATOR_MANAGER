@@ -20,6 +20,8 @@ class DataStorage:
         self.world_changed = False
         self.available_spawn_points = []
         self.spawned_actor_id = None
+        self.blueprint_new_data = None
+        self.physics_applied = False
 
     def add_actor(self, actor: carla.Actor, name: str):
         self.actors_db.add_actor(actor, name)

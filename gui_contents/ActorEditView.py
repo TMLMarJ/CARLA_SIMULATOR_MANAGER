@@ -1,4 +1,6 @@
 import tkinter as tk
+from typing import List, Any
+
 import carla
 from tkinter import ttk
 from gui_contents.color_picker import ColorPicker
@@ -6,22 +8,28 @@ from utilities.functions import rgb_to_hex, hex_to_rgb
 
 
 class EntityEditWindow(tk.Toplevel):
-    def __init__(self, parent, blueprint, entity=None, type="actor", blueprint_library=None, physic = None):
+    def __init__(self, parent, blueprint, entity=None, type="actor", blueprint_library=None, physic = None, on_apply = None, blueprint_data=None):
         super().__init__(parent)
 
         self.blueprint = blueprint_library.find(blueprint)
         self.entity = entity
         self.type = type
+        self.on_apply = on_apply
         self.row = None
         self.column = None
         if physic is None:
             self.physic = carla.VehiclePhysicsControl()
         else:
             self.physic = physic
-
-        self.attribute_vars = {}
+        if blueprint_data is None:
+            self.attribute_vars = {}
+        else:
+            self.attribute_vars = blueprint_data
+            for attr_id, attr_info in self.attribute_vars.items():
+                if self.blueprint.has_attribute(attr_id):
+                    self.blueprint.set_attribute(attr_id, str(attr_info))
         self.physics_vars = {
-            "torque_curve": [], #TODO: na koniec
+            "torque_curve": [],
             "max_rpm": tk.DoubleVar(value=self.physic.max_rpm),
             "moi": tk.DoubleVar(value=self.physic.moi),
             "damping_rate_full_throttle": tk.DoubleVar(value=self.physic.damping_rate_full_throttle),
@@ -58,17 +66,35 @@ class EntityEditWindow(tk.Toplevel):
         self.tabControl.add(self.WheelsTab, text="Wheels")
         self.tabControl.pack(expand=1, fill="both")
 
-
         self.blueprint_parameters_frame = ttk.Frame(self.BlueprintTab)
         self.physics_parameters_frame = ttk.Frame(self.PhysicsTab)
         self.wheels_parameters_frame = ttk.Frame(self.WheelsTab)
+        self.gears_parameters_frame = ttk.Frame(self.GearsTab)
+        self.torque_parameters_frame = ttk.Frame(self.TorqueTab)
+        self.steering_parameters_frame = ttk.Frame(self.SteeringTab)
 
         self.blueprint_parameters_frame.grid(row=0, column=0, sticky="nsew")
         self.create_blueprint_section()
-        self.physics_parameters_frame.grid(row=1, column=0, sticky="nsew")
+        self.physics_parameters_frame.grid(row=0, column=0, sticky="nsew")
         self.create_physic_section()
-        self.wheels_parameters_frame.grid(row=2, column=0, sticky="nsew")
-        self.create_wheels_section()
+        self.wheels_parameters_frame.grid(row=0, column=0, sticky="nsew")
+        self.wheels_table = self.create_wheels_section()
+        self.gears_parameters_frame.grid(row=0, column=0, sticky="nsew")
+        self.gears_table = self.create_gears_section()
+        self.torque_parameters_frame.grid(row=0, column=0, sticky="nsew")
+        self.torque_table = self.create_torque_section()
+        self.steering_parameters_frame.grid(row=0, column=0, sticky="nsew")
+        self.steering_table = self.create_steering_section()
+
+        self.button_frame = ttk.Frame(self)
+        self.button_frame.pack(side="bottom", fill="x", pady=10)
+        self.apply_button = ttk.Button(self.button_frame, text="Apply", command=self.apply)
+        self.apply_button.pack(side="right", padx=10)
+        self.cancel_button = ttk.Button(self.button_frame, text="Cancel", command=self.cancel)
+        self.cancel_button.pack(side="right", padx=10)
+
+    def cancel(self):
+        self.destroy()
 
     def create_blueprint_section(self):
         heading_frame = ttk.Frame(self.blueprint_parameters_frame)
@@ -79,6 +105,8 @@ class EntityEditWindow(tk.Toplevel):
         self.row = 0
         self.column = 0
         for attribute in self.blueprint:
+            if not attribute.is_modifiable:
+                continue
 
             self.create_attribute_widget(
                 attribute,
@@ -126,14 +154,6 @@ class EntityEditWindow(tk.Toplevel):
         ttk.Label(parameters_frame, text="Use Sweep Wheel Collision", font=self.arial_bold_).grid(row=2, column=2, sticky="w", padx=20)
         ttk.Checkbutton(parameters_frame, variable=self.physics_vars["use_sweep_wheel_collision"]).grid(row=3, column=2, sticky="w", padx=20)
 
-        # Torque Curve
-        ttk.Label(parameters_frame, text="Torque Curve", font=self.arial_bold_).grid(row=14, column=0, sticky="w", padx=20)
-        ttk.Label(parameters_frame, text="(Not Implemented)", font=("Arial", 10, "italic")).grid(row=15, column=0, sticky="w", padx=20)
-
-        # Steering Curve
-        ttk.Label(parameters_frame, text="Steering Curve", font=self.arial_bold_).grid(row=16, column=0, sticky="w", padx=20)
-        ttk.Label(parameters_frame, text="(Not Implemented)", font=("Arial", 10, "italic")).grid(row=17, column=0, sticky="w", padx=20)
-
         # Gear Switch Time
         ttk.Label(parameters_frame, text="Gear Switch Time [s]", font=self.arial_bold_).grid(row=0, column=1, sticky="w", padx=20)
         ttk.Spinbox(parameters_frame, from_=0, to=1e6, textvariable=self.physics_vars["gear_switch_time"]).grid(row=1, column=1, sticky="w", padx=20)
@@ -163,14 +183,28 @@ class EntityEditWindow(tk.Toplevel):
         ttk.Label(parameters_frame, text="Z", font=self.arial_bold_).grid(row=9, column=2, sticky="w", padx=30)
         ttk.Spinbox(parameters_frame, from_=-1e6, to=1e6, textvariable=self.physics_vars["center_of_mass"]["z"]).grid(row=10, column=2, sticky="w", padx=30)
 
+    def create_gears_section(self):
         # Gear Control
-        gear_table = GearManagerTable(parameters_frame, self.gear_data)
-        gear_table.grid(row=11, column=0, sticky="w", padx=20, columnspan=2)
+        gear_table = GearManagerTable(self.gears_parameters_frame, self.gear_data)
+        gear_table.grid(row=0, column=0, sticky="w", padx=20)
+        return gear_table
 
+    def create_torque_section(self):
+        # Torque Curve
+        torque_table = TorqueCurveTable(self.torque_parameters_frame, self.physic.torque_curve)
+        torque_table.grid(row=0, column=0, sticky="w", padx=20)
+        return torque_table
 
+    def create_steering_section(self):
+        # Steering Curve
+        steering_table = SteeringCurveTable(self.steering_parameters_frame, self.physic.steering_curve)
+        steering_table.grid(row=0, column=0, sticky="w", padx=20)
+        return steering_table
 
     def create_wheels_section(self):
-        pass
+        wheel_table = WheelsMenu(self.wheels_parameters_frame, self.physic.wheels)
+        wheel_table.grid(row=0, column=0, sticky="w", padx=20)
+        return wheel_table
 
     def create_attribute_widget(self, attribute, parent_frame):
         def format_name(name):
@@ -198,8 +232,10 @@ class EntityEditWindow(tk.Toplevel):
             ttk.Label(parent_frame, text=format_name(attribute.id),
                       font=arial_bold_).grid(row=self.row, column=self.column, sticky="w", padx=20)
             self.row += 1
-            ttk.Spinbox(parent_frame, from_=-1e6, to=1e6, textvariable=var).grid(row=self.row, column=self.column, sticky="w", padx=20)
-
+            spinbox = ttk.Spinbox(parent_frame, from_=-1e6, to=1e6, textvariable=var)
+            spinbox.grid(row=self.row, column=self.column, sticky="w", padx=20)
+            if "wheel" in format_name(attribute.id).lower() and ("num" in format_name(attribute.id).lower() or "number" in format_name(attribute.id).lower()):
+                spinbox.configure(state=tk.DISABLED)
             self.attribute_vars[attribute.id] = {
                 "type": attribute.type,
                 "var": var
@@ -212,8 +248,10 @@ class EntityEditWindow(tk.Toplevel):
             ttk.Label(parent_frame, text=format_name(attribute.id),
                       font=arial_bold_).grid(row=self.row, column=self.column, sticky="w", padx=20)
             self.row += 1
-            ttk.Spinbox(parent_frame, from_=-1e6, to=1e6, textvariable=var, format="%.2f").grid(row=self.row, column=self.column, sticky="w", padx=20)
-
+            spinbox = ttk.Spinbox(parent_frame, from_=-1e6, to=1e6, textvariable=var, format="%.2f")
+            spinbox.grid(row=self.row, column=self.column, sticky="w", padx=20)
+            if "wheel" in format_name(attribute.id).lower() and ("num" in format_name(attribute.id).lower() or "number" in format_name(attribute.id).lower()):
+                spinbox.configure(state=tk.DISABLED)
             self.attribute_vars[attribute.id] = {
                 "type": attribute.type,
                 "var": var
@@ -243,11 +281,77 @@ class EntityEditWindow(tk.Toplevel):
             color_picker = ColorPicker(parent_frame, color=default_value_hex)
             color_picker.grid(row=self.row, column=self.column, sticky="w", padx=20)
             var = hex_to_rgb(color_picker.color)
+            print(var)
 
             self.attribute_vars[attribute.id] = {
                 "type": attribute.type,
-                "var": var
+                "widget": color_picker
             }
+
+    def get_data(self):
+        # Blueprint data
+        blueprint_data = {}
+
+        for attr_id, attr_info in self.attribute_vars.items():
+            if attr_info["type"] == carla.ActorAttributeType.Int:
+                blueprint_data[attr_id] = attr_info["var"].get()
+            elif attr_info["type"] == carla.ActorAttributeType.Float:
+                blueprint_data[attr_id] = float(attr_info["var"].get())
+            elif attr_info["type"] == carla.ActorAttributeType.String:
+                blueprint_data[attr_id] = attr_info["var"].get()
+            elif attr_info["type"] == carla.ActorAttributeType.RGBColor:
+                blueprint_data[attr_id] = hex_to_rgb(attr_info["widget"].color)
+                print(blueprint_data[attr_id])
+
+        # Physics data
+        max_rpm = self.physics_vars["max_rpm"].get()
+        moi = self.physics_vars["moi"].get()
+        damping_rate_full_throttle = self.physics_vars["damping_rate_full_throttle"].get()
+        damping_rate_zero_throttle_clutch_engaged = self.physics_vars["damping_rate_zero_throttle_clutch_engaged"].get()
+        damping_rate_zero_throttle_clutch_disengaged = self.physics_vars["damping_rate_zero_throttle_clutch_disengaged"].get()
+        use_gear_autobox = self.physics_vars["use_gear_autobox"].get()
+        gear_switch_time = self.physics_vars["gear_switch_time"].get()
+        clutch_strength = self.physics_vars["clutch_strength"].get()
+        final_ratio = self.physics_vars["final_ratio"].get()
+        mass = self.physics_vars["mass"].get()
+        drag_coefficient = self.physics_vars["drag_coefficient"].get()
+        center_of_mass = carla.Location(
+            x=float(self.physics_vars["center_of_mass"]["x"].get()),
+            y=float(self.physics_vars["center_of_mass"]["y"].get()),
+            z=float(self.physics_vars["center_of_mass"]["z"].get())
+        )
+        use_sweep_wheel_collision = self.physics_vars["use_sweep_wheel_collision"].get()
+        torque_curve = self.torque_table.get_data()
+        gears = self.gears_table.get_data()
+        steering = self.steering_table.get_data()
+        wheels = self.wheels_table.get_data()
+
+        physics_data = carla.VehiclePhysicsControl(
+            torque_curve=torque_curve,
+            max_rpm=max_rpm,
+            moi=moi,
+            damping_rate_full_throttle=damping_rate_full_throttle,
+            damping_rate_zero_throttle_clutch_engaged=damping_rate_zero_throttle_clutch_engaged,
+            damping_rate_zero_throttle_clutch_disengaged=damping_rate_zero_throttle_clutch_disengaged,
+            use_gear_autobox=use_gear_autobox,
+            gear_switch_time=gear_switch_time,
+            clutch_strength=clutch_strength,
+            final_ratio=final_ratio,
+            forward_gears=gears,
+            mass=mass,
+            drag_coefficient=drag_coefficient,
+            center_of_mass=center_of_mass,
+            steering_curve=steering,
+            use_sweep_wheel_collision=use_sweep_wheel_collision,
+            wheels=wheels
+        )
+        return {"blueprint": blueprint_data, "physics": physics_data}
+
+    def apply(self):
+        data = self.get_data()
+        if self.on_apply:
+            self.on_apply(data)
+        self.destroy()
 
 class GearManagerTable(ttk.Frame):
     def __init__(self, parent, gears):
@@ -261,22 +365,33 @@ class GearManagerTable(ttk.Frame):
 
         title = ttk.Label(self, text="Gear Control", style="TLabel", font=("Arial", 12, "bold"))
         title.pack(side="top", fill="x", pady=(10, 8))
+        self.table_frame = ttk.Frame(self)
+        self.table_frame.pack(fill="both", expand=True)
 
         columns = ("Gear", "Ratio", "Down Ratio", "Up Ratio")
-        self.treeview = ttk.Treeview(self, columns=columns, show="headings", height=10, style="Treeview", selectmode="browse")
+        self.treeview = ttk.Treeview(self.table_frame, columns=columns, show="headings", height=10, style="Treeview", selectmode="browse")
         self.treeview.heading("Gear", text="Gear")
         self.treeview.heading("Ratio", text="Ratio")
         self.treeview.heading("Down Ratio", text="Down Ratio")
         self.treeview.heading("Up Ratio", text="Up Ratio")
 
+        self.add_button = self.treeview.insert("", "end", values=("+ Add Gear", "", "", ""))
         for gear in gears:
             self.add_gear(gear)
 
-        self.add_button = self.treeview.insert("", "end", values=("+ Add Gear", "", "", ""))
         self.treeview.bind("<Double-1>", self.edit_cell)
         self.treeview.bind("<Delete>", self.delete_selected)
 
-        self.treeview.pack(fill="both", expand=True)
+        self.treeview.pack(side="left", fill="both", expand=True)
+
+        self.button_frame = ttk.Frame(self.table_frame)
+        self.button_frame.pack(side="right", fill="y", padx=(10, 0))
+
+        self.up_button = ttk.Button(self.button_frame, text="▲", command=self.move_up)
+        self.up_button.pack(side="top", pady=(0, 5))
+        self.down_button = ttk.Button(self.button_frame, text="▼", command=self.move_down)
+        self.down_button.pack(side="top")
+
 
     def add_gear(self, gear):
         gear_number = len(self.treeview.get_children())
@@ -354,3 +469,473 @@ class GearManagerTable(ttk.Frame):
                 continue
             self.treeview.set(item, "#1", number)
             number += 1
+
+    def move_up(self):
+        selected = self.treeview.selection()
+
+        if not selected:
+            return
+
+        item = selected[0]
+
+        if item == self.add_button:
+            return
+
+        index = self.treeview.index(item)
+
+        if index >0:
+            self.treeview.move(item, "", index - 1)
+
+        self.renumber_gears()
+
+    def move_down(self):
+        selected = self.treeview.selection()
+
+        if not selected:
+            return
+
+        item = selected[0]
+
+        if item == self.add_button:
+            return
+
+        index = self.treeview.index(item)
+
+        if index < len(self.treeview.get_children()) - 2:
+            self.treeview.move(item, "", index + 1)
+
+        self.renumber_gears()
+
+    def get_data(self):
+        gears = []
+        for item in self.treeview.get_children():
+            if item == self.add_button:
+                continue
+            gear_number = int(self.treeview.set(item, "#1"))
+            ratio = float(self.treeview.set(item, "#2"))
+            down_ratio = float(self.treeview.set(item, "#3"))
+            up_ratio = float(self.treeview.set(item, "#4"))
+            gears.append(carla.GearPhysicsControl(ratio, down_ratio, up_ratio))
+        return gears
+
+class TorqueCurveTable(ttk.Frame):
+    def __init__(self, parent, torque_curve: List[carla.Vector2D]):
+        super().__init__(parent)
+        self.torque_curve = torque_curve
+        self.default_color = "#F7E7D3"
+        self.panel_color = "#F1D0A3"
+        self.accent_color = "#C96D3C"
+        self.text_color = "#4A2E1D"
+        self.subtle_color = "#E7B36C"
+
+        title = ttk.Label(self, text="Torque Curve", style="TLabel", font=("Arial", 12, "bold"))
+        title.pack(side="top", fill="x", pady=(10, 8))
+
+        self.table_frame = ttk.Frame(self)
+        self.table_frame.pack(fill="both", expand=True)
+
+        columns = ("RPM", "Torque")
+        self.treeview = ttk.Treeview(self.table_frame, columns=columns, show="headings", height=10, style="Treeview", selectmode="browse")
+        self.treeview.heading("RPM", text="RPM")
+        self.treeview.heading("Torque", text="Torque")
+
+        self.add_button = self.treeview.insert("", "end", values=("+ Add Point", ""))
+
+        for point in torque_curve:
+            self.add_point([point.x, point.y])
+
+        self.treeview.bind("<Double-1>", self.edit_cell)
+        self.treeview.bind("<Delete>", self.delete_selected)
+
+
+        self.treeview.pack(side="left", fill="both", expand=True)
+
+        self.button_frame = ttk.Frame(self.table_frame)
+        self.button_frame.pack(side="right", fill="y", padx=(10, 0))
+
+        self.up_button = ttk.Button(self.button_frame, text="▲", command=self.move_up)
+        self.up_button.pack(side="top", pady=(0, 5))
+        self.down_button = ttk.Button(self.button_frame, text="▼", command=self.move_down)
+        self.down_button.pack(side="top")
+
+    def add_point(self, point):
+        item = self.treeview.insert("", self.treeview.index(self.add_button), values=(point[0], point[1]))
+        return item
+
+    def edit_cell(self, event):
+        region = self.treeview.identify("region", event.x, event.y)
+
+        if region != "cell":
+            return
+
+        column = self.treeview.identify_column(event.x)
+        row = self.treeview.identify_row(event.y)
+
+        if not row or not column:
+            return
+
+        if row == self.add_button:
+            self.add_point([0, 0])
+            return
+
+        bbox = self.treeview.bbox(row, column)
+
+        if not bbox:
+            return
+
+        x, y, width, height = bbox
+
+        value = self.treeview.set(row, column)
+
+        entry = ttk.Entry(self.treeview)
+        entry.insert(0, value)
+
+        entry.place(x=x, y=y, width=width, height=height)
+        entry.focus()
+        entry.select_range(0, tk.END)
+
+        def save(event=None):
+            new_value = entry.get()
+            try:
+                new_value = float(new_value)
+            except ValueError:
+                entry.destroy()
+                return
+            self.treeview.set(row, column, new_value)
+            entry.destroy()
+
+        entry.bind("<Return>", save)
+        entry.bind("<FocusOut>", save)
+        entry.bind("<Escape>", lambda event: entry.destroy())
+
+    def delete_selected(self, event=None):
+        selected = self.treeview.selection()
+
+        if not selected:
+            return
+
+        for item in selected:
+            if item == self.add_button:
+                continue
+            self.treeview.delete(item)
+
+    def move_up(self, event=None):
+        selected = self.treeview.selection()
+
+        if not selected:
+            return
+
+        item = selected[0]
+
+        if item == self.add_button:
+            return
+
+        index = self.treeview.index(item)
+
+        if index >0:
+            self.treeview.move(item, "", index - 1)
+
+
+    def move_down(self, event=None):
+        selected = self.treeview.selection()
+
+        if not selected:
+            return
+
+        item = selected[0]
+
+        if item == self.add_button:
+            return
+
+        index = self.treeview.index(item)
+
+        if index < len(self.treeview.get_children()) - 2:
+            self.treeview.move(item, "", index + 1)
+
+    def get_data(self):
+        torque_curve = []
+        for item in self.treeview.get_children():
+            if item == self.add_button:
+                continue
+            rpm = float(self.treeview.set(item, "RPM"))
+            torque = float(self.treeview.set(item, "Torque"))
+            torque_curve.append(carla.Vector2D(rpm, torque))
+        return torque_curve
+
+class SteeringCurveTable(ttk.Frame):
+    def __init__(self, parent, steering_curve: List[carla.Vector2D]):
+        super().__init__(parent)
+        self.steering_curve = steering_curve
+        self.default_color = "#F7E7D3"
+        self.panel_color = "#F1D0A3"
+        self.accent_color = "#C96D3C"
+        self.text_color = "#4A2E1D"
+        self.subtle_color = "#E7B36C"
+
+        title = ttk.Label(self, text="Steering Curve", style="TLabel", font=("Arial", 12, "bold"))
+        title.pack(side="top", fill="x", pady=(10, 8))
+
+        self.table_frame = ttk.Frame(self)
+        self.table_frame.pack(fill="both", expand=True)
+
+        columns = ("Speed", "Steering Angle")
+        self.treeview = ttk.Treeview(self.table_frame, columns=columns, show="headings", height=10, style="Treeview", selectmode="browse")
+        self.treeview.heading("Speed", text="Speed")
+        self.treeview.heading("Steering Angle", text="Steering Angle")
+
+        self.add_button = self.treeview.insert("", "end", values=("+ Add Point", ""))
+
+        for point in steering_curve:
+            self.add_point([point.x, point.y])
+
+        self.treeview.bind("<Double-1>", self.edit_cell)
+        self.treeview.bind("<Delete>", self.delete_selected)
+
+
+        self.treeview.pack(side="left", fill="both", expand=True)
+
+        self.button_frame = ttk.Frame(self.table_frame)
+        self.button_frame.pack(side="right", fill="y", padx=(10, 0))
+
+        self.up_button = ttk.Button(self.button_frame, text="▲", command=self.move_up)
+        self.up_button.pack(side="top", pady=(0, 5))
+        self.down_button = ttk.Button(self.button_frame, text="▼", command=self.move_down)
+        self.down_button.pack(side="top")
+
+    def add_point(self, point):
+        item = self.treeview.insert("", self.treeview.index(self.add_button), values=(point[0], point[1]))
+        return item
+
+    def edit_cell(self, event):
+        region = self.treeview.identify("region", event.x, event.y)
+
+        if region != "cell":
+            return
+
+        column = self.treeview.identify_column(event.x)
+        row = self.treeview.identify_row(event.y)
+
+        if not row or not column:
+            return
+
+        if row == self.add_button:
+            self.add_point([0, 0])
+            return
+
+        bbox = self.treeview.bbox(row, column)
+
+        if not bbox:
+            return
+
+        x, y, width, height = bbox
+
+        value = self.treeview.set(row, column)
+
+        entry = ttk.Entry(self.treeview)
+        entry.insert(0, value)
+
+        entry.place(x=x, y=y, width=width, height=height)
+        entry.focus()
+        entry.select_range(0, tk.END)
+
+        def save(event=None):
+            new_value = entry.get()
+            try:
+                new_value = float(new_value)
+            except ValueError:
+                entry.destroy()
+                return
+            self.treeview.set(row, column, new_value)
+            entry.destroy()
+
+        entry.bind("<Return>", save)
+        entry.bind("<FocusOut>", save)
+        entry.bind("<Escape>", lambda event: entry.destroy())
+
+    def delete_selected(self, event=None):
+        selected = self.treeview.selection()
+
+        if not selected:
+            return
+
+        for item in selected:
+            if item == self.add_button:
+                continue
+            self.treeview.delete(item)
+
+    def move_up(self, event=None):
+        selected = self.treeview.selection()
+
+        if not selected:
+            return
+
+        item = selected[0]
+
+        if item == self.add_button:
+            return
+
+        index = self.treeview.index(item)
+
+        if index > 0:
+            self.treeview.move(item, "", index - 1)
+
+    def move_down(self, event=None):
+        selected = self.treeview.selection()
+
+        if not selected:
+            return
+
+        item = selected[0]
+
+        if item == self.add_button:
+            return
+
+        index = self.treeview.index(item)
+
+        if index < len(self.treeview.get_children()) - 2:
+            self.treeview.move(item, "", index + 1)
+
+    def get_data(self):
+        steering_curve = []
+        for item in self.treeview.get_children():
+            if item == self.add_button:
+                continue
+            speed = float(self.treeview.set(item, "Speed"))
+            steering_angle = float(self.treeview.set(item, "Steering Angle"))
+            steering_curve.append(carla.Vector2D(speed, steering_angle))
+        return steering_curve
+
+class WheelsMenu(ttk.Frame):
+    def __init__(self, parent, wheels: List[carla.WheelPhysicsControl]):
+        super().__init__(parent)
+        self.wheels = wheels
+
+        self.arial_10 = ("Arial", 10)
+        self.heading_frame = ttk.Frame(self)
+        self.heading_frame.pack(side="top", fill="x", pady=(10, 8))
+        ttk.Label(self.heading_frame, text="Wheels", font=("Arial", 12, "bold")).grid(row=0, column=0, sticky="w", padx=20)
+        self.number_of_wheels = len(self.wheels)
+        if self.number_of_wheels == 4:
+            self.wheel_options = ["FL", "FR", "RL", "RR"]
+        elif self.number_of_wheels == 6:
+            self.wheel_options = ["FL", "FR", "ML", "MR", "RL", "RR"]
+        elif self.number_of_wheels == 2:
+            self.wheel_options = ["Front", "Rear"]
+        else:
+            self.wheel_options = [f"Wheel {i + 1}" for i in range(self.number_of_wheels)]
+
+        self.wheel_frame = ttk.Frame(self)
+        self.wheel_frame.pack(side="top", fill="x", pady=(10, 8))
+
+        self.default_color = "#F7E7D3"
+        self.panel_color = "#F1D0A3"
+        self.accent_color = "#C96D3C"
+        self.text_color = "#4A2E1D"
+        self.subtle_color = "#E7B36C"
+
+        column_specs = (
+            ("Wheel", "Wheel", 70),
+            ("Tire Friction", "Tire\nFriction", 80),
+            ("Damping Rate", "Damping\nRate", 80),
+            ("Max Steer Angle", "Max Steer\nAngle", 90),
+            ("Radius", "Radius", 60),
+            ("Max Brake Torque", "Max Brake\nTorque", 85),
+            ("Max Handbrake Torque", "Max\nHandbrake\nTorque", 95)
+        )
+        columns = tuple(column for column, _, _ in column_specs)
+        self.treeview = ttk.Treeview(self, columns=columns, selectmode="browse", show="headings", style="Treeview")
+        for column, heading, width in column_specs:
+            self.treeview.heading(column, text=heading, anchor="center")
+            self.treeview.column(column, width=width, minwidth=width, stretch=False, anchor="center")
+
+        for wheel in wheels:
+            self.add_wheel(wheel)
+
+        self.treeview.bind("<Double-1>", self.edit_cell)
+        self.treeview.pack(side="top", fill="x", pady=(10, 8))
+
+    def add_wheel(self, wheel):
+        wheel_index = len(self.treeview.get_children())
+        wheel_name = self.wheel_options[wheel_index] if wheel_index < len(self.wheel_options) else f"Wheel {wheel_index + 1}"
+        item = self.treeview.insert("", "end", values=(
+            wheel_name,
+            wheel.tire_friction,
+            wheel.damping_rate,
+            wheel.max_steer_angle,
+            wheel.radius,
+            wheel.max_brake_torque,
+            wheel.max_handbrake_torque
+        ))
+        return item
+
+    def edit_cell(self, event):
+        region = self.treeview.identify("region", event.x, event.y)
+
+        if region != "cell":
+            return
+
+        column = self.treeview.identify_column(event.x)
+        row = self.treeview.identify_row(event.y)
+
+        if not row or not column:
+            return
+
+        if column == "#0":
+            return
+
+        bbox = self.treeview.bbox(row, column)
+
+        if not bbox:
+            return
+
+        x, y, width, height = bbox
+
+        value = self.treeview.set(row, column)
+
+        entry = ttk.Entry(self.treeview)
+        entry.insert(0, value)
+
+        entry.place(x=x, y=y, width=width, height=height)
+        entry.focus()
+        entry.select_range(0, tk.END)
+
+        def save(event=None):
+            new_value = entry.get()
+            try:
+                new_value = float(new_value)
+            except ValueError:
+                entry.destroy()
+                return
+            self.treeview.set(row, column, new_value)
+            entry.destroy()
+
+        entry.bind("<Return>", save)
+        entry.bind("<FocusOut>", save)
+        entry.bind("<Escape>", lambda event: entry.destroy())
+
+    def get_data(self):
+        wheels = []
+        for item in self.treeview.get_children():
+            wheel_index = self.treeview.index(item)
+            tire_friction = float(self.treeview.set(item, "Tire Friction"))
+            damping_rate = float(self.treeview.set(item, "Damping Rate"))
+            max_steer_angle = float(self.treeview.set(item, "Max Steer Angle"))
+            radius = float(self.treeview.set(item, "Radius"))
+            max_brake_torque = float(self.treeview.set(item, "Max Brake Torque"))
+            max_handbrake_torque = float(self.treeview.set(item, "Max Handbrake Torque"))
+
+            wheel = carla.WheelPhysicsControl(
+                tire_friction=tire_friction,
+                damping_rate=damping_rate,
+                max_steer_angle=max_steer_angle,
+                radius=radius,
+                max_brake_torque=max_brake_torque,
+                max_handbrake_torque=max_handbrake_torque
+            )
+            wheels.append(wheel)
+        return wheels
+
+
+
+
+

@@ -21,7 +21,7 @@ class ColorPicker(ttk.Frame):
         rgb, hex_color = colorchooser.askcolor(title="Choose a color", initialcolor=self.color, color=self.color)
         if hex_color is None:
             return
-
+        print(f"Selected color: {hex_color}")
         self.color = hex_color
         self.preview.config(bg=self.color)
         self.color_label.config(text=self.color)

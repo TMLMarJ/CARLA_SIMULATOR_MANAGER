@@ -76,7 +76,7 @@ class VehiclePreviewFrame(tk.Frame):
     def update_image(self):
         if self.preview.image is not None:
             image = self.preview.image.copy()
-            image.thumbnail((360, 270))
+            image.thumbnail((280, 210))
 
             photo = ImageTk.PhotoImage(image)
 

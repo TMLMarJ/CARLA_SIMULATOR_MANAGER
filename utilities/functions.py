@@ -56,10 +56,12 @@ def return_data_from_transform(transform: carla.Transform):
 
 def hex_to_rgb(hex_color: str):
     hex_color = hex_color.lstrip('#')
-    r_string = hex_color[0:2]
-    g_string = hex_color[2:4]
-    b_string = hex_color[4:6]
-    return f"rgb({int(r_string, 16)}, {int(g_string, 16)}, {int(b_string, 16)})"
+
+    r = int(hex_color[0:2], 16)
+    g = int(hex_color[2:4], 16)
+    b = int(hex_color[4:6], 16)
+
+    return f"{r},{g},{b}"
 
 def rgb_to_hex(rgb: str):
     r, g, b = map(int, rgb.strip("rgb()").split(","))

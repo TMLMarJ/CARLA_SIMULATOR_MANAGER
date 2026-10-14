@@ -7,6 +7,8 @@ from pygments.lexers import blueprint
 from utilities.functions import filter_carla_id_by_type, return_data_from_transform, wait_and_try
 from gui_contents.vehicle_spawn_preview import VehiclePreviewFrame, VehiclePreview
 from gui_contents.ActorEditView import EntityEditWindow
+from gui_contents.change_model_top import ChangeModelTop
+from gui_contents.set_transform_top import ChangeTransformTop
 import messagebox
 import carla
 import numpy as np
@@ -27,11 +29,6 @@ class CustomVehicleFrame(tk.Frame):
 
         self.vehicle_preview = VehiclePreview(self.database, controller)
 
-        # Vehicle Tab
-        self.vehicle_control_frame = ttk.Frame(self, style="new.TFrame")
-        self.vehicle_control_frame.pack(expand=1, fill="both", padx=18, pady=(12, 18))
-        self.vehicle_control_frame.grid_columnconfigure(0, weight=1)
-        self.vehicle_control_frame.grid_rowconfigure(0, weight=1)
         self._vehicle_variables_definition()
         self._vehicle_frame_setup()
 
@@ -71,26 +68,40 @@ class CustomVehicleFrame(tk.Frame):
 
     def _vehicle_frame_setup(self):
         vehicle_classes = ["Car", "Bus", "Van", "Truck", "Motorcycle", "Bicycle"]
-        upper_frame = ttk.Frame(self.vehicle_control_frame, style="new.TFrame")
-        lower_frame = ttk.Frame(self.vehicle_control_frame, style="new.TFrame")
-        upper_frame.pack(side="top", fill="x")
-        lower_frame.pack(side="bottom", fill="both", expand=True)
+        upper_frame = ttk.LabelFrame(
+            self,
+            text="Spawn Vehicles",
+            style="Section.TLabelframe",
+            padding=(12, 8)
+        )
+        lower_frame = ttk.LabelFrame(
+            self,
+            text="Vehicle Management",
+            style="Section.TLabelframe",
+            padding=(12, 8)
+        )
+        upper_frame.pack(side="top", fill="x", padx=18, pady=(6, 12))
+        lower_frame.pack(side="bottom", fill="both", expand=True, padx=18, pady=(6, 12))
 
         upper_frame.grid_columnconfigure(0, weight=1)
-        upper_frame.grid_columnconfigure(1, weight=2)
+        upper_frame.grid_columnconfigure(1, weight=1)
+        upper_frame.grid_columnconfigure(2, weight=1)
+        lower_frame.grid_columnconfigure(0, weight=1)
         lower_frame.grid_rowconfigure(0, weight=1)
+        lower_frame.grid_rowconfigure(1, weight=0)
 
         heading_frame = ttk.Frame(upper_frame, style="new.TFrame")
-        heading_frame.grid(row=0, column=0, sticky="nw", padx=(20, 12), pady=(20, 12))
+        heading_frame.grid(row=0, column=0, sticky="nw", padx=(12, 8), pady=(8, 8))
 
         self.image_frame = VehiclePreviewFrame(upper_frame, self.vehicle_preview)
-        self.image_frame.grid(row=0, column=1, sticky="n", padx=(12, 20), pady=(20, 12))
+        self.image_frame.grid(row=0, column=2, sticky="n", padx=(8, 12), pady=(8, 8))
 
         location_frame = ttk.Frame(upper_frame, style="new.TFrame")
-        location_frame.grid(row=1, column=0, columnspan=2, sticky="ew", padx=20, pady=(10, 20))
+        location_frame.grid(row=0, column=1, sticky="ew", padx=8, pady=(8, 8))
 
         button_frame = ttk.Frame(upper_frame, style="new.TFrame")
-        button_frame.grid(row=1, column=1, sticky="n", padx=(0, 20), pady=(0, 20))
+        button_frame.grid(row=1, column=0, columnspan=3, sticky="n", padx=(0, 12), pady=(0, 8))
+
 
         # ================================= Heading ======================================
 
@@ -98,7 +109,7 @@ class CustomVehicleFrame(tk.Frame):
         heading_frame.grid_columnconfigure(1, weight=1)
 
         heading_label = tk.Label(heading_frame, text="Vehicles menu", bg=self.default_color, fg=self.text_color, font=("Arial", 18, "bold"))
-        heading_label.grid( row=0, column=0, columnspan=2, sticky="w", pady=(0, 16))
+        heading_label.grid( row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
 
         # ================================= Vehicle name =================================
 
@@ -206,21 +217,95 @@ class CustomVehicleFrame(tk.Frame):
         roll_spinbox.grid(row=6, column=0)
 
         # ==================================== Table ===================================
+
         self.vehicle_table = VehicleTable(lower_frame, self.controller)
-        self.vehicle_table.pack(expand=1, fill="both", padx=20, pady=(10, 20))
-        self.vehicle_table.tree.bind("<Double-1>", self.set_variables_from_table)
+        self.vehicle_table.grid(row=0, column=0, sticky="nsew", padx=20, pady=(10, 10))
+
+        button_control_frame = ttk.Frame(lower_frame, style="new.TFrame")
+        button_control_frame.grid(row=1, column=0, sticky="ew", padx=20, pady=(0, 12))
+        for index in range(5):
+            button_control_frame.grid_columnconfigure(index, weight=1)
 
         #==================================== Buttons ===================================
         spawn_button = ttk.Button(button_frame, text="Spawn Vehicle", command=self.spawn_vehicle, width=18)
-        spawn_button.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        remove_button = ttk.Button(button_frame, text="Remove", command=self.remove_vehicle, width=18)
-        remove_button.grid(row=1, column=0, sticky="ew", pady=(0, 8))
-        edit_button = ttk.Button(button_frame, text="Edit", command=self.edit_vehicle, width=18)
-        edit_button.grid(row=2, column=0, sticky="ew", pady=(0, 8))
-        update_button = ttk.Button(button_frame, text="Update", command=self.update_vehicle, width=18)
-        update_button.grid(row=3, column=0, sticky="ew", pady=(0, 8))
+        spawn_button.grid(row=0, column=0, sticky="ew", pady=(0, 8), padx=(0, 10))
+        physics_button = ttk.Button(button_frame, text="Edit", command=self.edit_vehicle, width=18)
+        physics_button.grid(row=0, column=1, sticky="ew", pady=(0, 8), padx=(0, 10))
         attach_sensor_button = ttk.Button(button_frame, text="Attach Sensor", command=self.attach_sensor, width=18)
-        attach_sensor_button.grid(row=4, column=0, pady=(0, 8), sticky="ew")
+        attach_sensor_button.grid(row=0, column=2, pady=(0, 8), padx=(0, 10), sticky="ew")
+        remove_button = ttk.Button(button_control_frame, text="Remove", command=self.remove_vehicle, width=18)
+        remove_button.grid(row=0, column=0, sticky="ew", pady=(0, 8), padx=(0, 10))
+        change_model_button = ttk.Button(button_control_frame, text="Change Model", command=self.change_model, width=18)
+        change_model_button.grid(row=0, column=1, sticky="ew", pady=(0, 8), padx=(0, 10))
+        update_location_button = ttk.Button(button_control_frame, text="Update Location", command=self.update_location, width=18)
+        update_location_button.grid(row=0, column=2, sticky="ew", pady=(0, 8), padx=(0, 10))
+        attach_sensor_to_existing_button = ttk.Button(button_control_frame, text="Attach Sensor to Existing Vehicle", command=self.attach_sensor, width=30)
+        attach_sensor_to_existing_button.grid(row=0, column=3, sticky="ew", pady=(0, 8), padx=(0, 10))
+        copy_button = ttk.Button(button_control_frame, text="Copy Vehicle", command=self.copy_vehicle, width=18)
+        copy_button.grid(row=0, column=4, sticky="ew", pady=(0, 8), padx=(0, 10))
+
+    def update_location(self, event=None):
+        if not self.vehicle_table.tree.selection():
+            return
+        selected_vehicle = self.vehicle_table.tree.selection()
+        vehicle_id = self.vehicle_table.tree.item(selected_vehicle)["values"][1]
+        current_transform = self.database.actors_db.actors_db[vehicle_id].transform
+        top = ChangeTransformTop(self, self.database.world.get_map().get_spawn_points(), current_transform, self.set_new_transform)
+
+    def set_new_transform(self, transform, event=None):
+        print(transform)
+        selected_vehicle = self.vehicle_table.tree.selection()
+        if not selected_vehicle:
+            return
+        selected_vehicle_id = self.vehicle_table.tree.item(selected_vehicle)["values"][1]
+        self.controller.carla.set_vehicle_transform(transform, selected_vehicle_id)
+        self.vehicle_table.tree.item(selected_vehicle, values=(
+            self.vehicle_table.tree.item(selected_vehicle)["values"][0],
+            self.vehicle_table.tree.item(selected_vehicle)["values"][1],
+            self.vehicle_table.tree.item(selected_vehicle)["values"][2],
+            f"({transform.location.x:.2f}, {transform.location.y:.2f}, {transform.location.z:.2f})",
+            f"({transform.rotation.yaw:.2f}, {transform.rotation.pitch:.2f}, {transform.rotation.roll:.2f})",
+            self.vehicle_table.tree.item(selected_vehicle)["values"][5],
+            self.vehicle_table.tree.item(selected_vehicle)["values"][6]
+        ))
+
+    def copy_vehicle(self, event=None):
+        pass
+
+    def change_model(self, event=None):
+        if not self.vehicle_table.tree.selection():
+            return
+        top = ChangeModelTop(self, "vehicle", self.database.blueprint_lib, self.change_spawned_vehicle_model)
+
+    def change_spawned_vehicle_model(self,selected_class, selected_model, event=None):
+        selected_vehicle = self.vehicle_table.tree.selection()
+        if not selected_vehicle:
+            return
+        actor_model = filter_carla_id_by_type("vehicle", selected_class, self.database.blueprint_lib)
+        blueprint_id = actor_model[selected_model]
+        selected_vehicle_id = self.vehicle_table.tree.item(selected_vehicle)["values"][1]
+        self.controller.carla.change_vehicle_model(blueprint_id, self.database.actors_db.actors[selected_vehicle_id].id)
+
+        try:
+            is_changed = wait_and_try(
+                lambda: self.database.spawned_actor_id is not None
+            )
+            if is_changed:
+                veh_id = self.database.actors_db.actors[self.database.spawned_actor_id].id
+                new_vehicle_model = selected_class.upper() + ":" + selected_model
+                self.vehicle_table.tree.item(selected_vehicle, values=(
+                    self.vehicle_table.tree.item(selected_vehicle)["values"][0],
+                    veh_id,
+                    new_vehicle_model,
+                    self.vehicle_table.tree.item(selected_vehicle)["values"][3],
+                    self.vehicle_table.tree.item(selected_vehicle)["values"][4],
+                    self.vehicle_table.tree.item(selected_vehicle)["values"][5],
+                    self.vehicle_table.tree.item(selected_vehicle)["values"][6]
+                ))
+                self.database.spawned_actor_id = None
+        except KeyError:
+            veh_id = None
+            print("Database update failed. Vehicle not found in database.")
 
     def _update_model(self, event):
         self.actor_model = filter_carla_id_by_type("vehicle", self.choose_class.get().lower(),
@@ -345,7 +430,22 @@ class CustomVehicleFrame(tk.Frame):
 
     def edit_vehicle(self):
         blueprint = self.actor_model[self.actor_model_combobox.get()]
-        top = EntityEditWindow(self, blueprint, None, "vehicle", self.database.blueprint_lib)
+        top = EntityEditWindow(self, blueprint, None, "vehicle", self.database.blueprint_lib, self.database.ghost_physic, self.apply_vehicle_changes, self.database.blueprint_new_data)
+
+    def apply_vehicle_changes(self, data):
+        blueprint_data = data["blueprint"]
+        physics = data["physics"]
+        self.database.blueprint_new_data = blueprint_data
+        print(blueprint_data)
+        self.controller.carla.apply_new_physics_and_blueprint_to_ghost(physics)
+
+        is_changed = wait_and_try(
+            lambda: self.database.physics_applied == True
+        )
+
+        if is_changed:
+            self.image_frame.update_image()
+            self.database.physics_applied = False
 
     def reset_tab(self):
         self.vehicle_name_var.set("Ghost Vehicle")
@@ -449,6 +549,55 @@ class VehicleTable(ttk.Frame):
 
         self.tree.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
+
+        self.tree.bind("<Double-1>", self.edit_cell)
+
+    def edit_cell(self, event):
+        region = self.tree.identify("region", event.x, event.y)
+
+        if region != "cell":
+            return
+
+        column = self.tree.identify_column(event.x)
+        row = self.tree.identify_row(event.y)
+
+        if not row or not column:
+            return
+
+        if column != "#1":
+            return
+
+        bbox = self.tree.bbox(row, column)
+
+        if not bbox:
+            return
+
+        x, y, width, height = bbox
+
+        value = self.tree.set(row, column)
+
+        entry = ttk.Entry(self.tree)
+        entry.insert(0, value)
+
+        entry.place(x=x, y=y, width=width, height=height)
+        entry.focus()
+        entry.select_range(0, tk.END)
+
+        def save(event=None):
+            new_value = entry.get()
+            try:
+                new_value = str(new_value)
+            except ValueError:
+                entry.destroy()
+                return
+            self.tree.set(row, column, new_value)
+            vehicle_id = self.tree.item(row)["values"][1]
+            self.controller.database.actors_db.actors_db[vehicle_id].user_name = new_value
+            entry.destroy()
+
+        entry.bind("<Return>", save)
+        entry.bind("<FocusOut>", save)
+        entry.bind("<Escape>", lambda event: entry.destroy())
 
     def add_vehicle_to_table(self, vehicle_info):
         name = vehicle_info["name"]

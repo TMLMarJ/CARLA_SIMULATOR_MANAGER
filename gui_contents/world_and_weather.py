@@ -19,29 +19,40 @@ class CustomWorldAndWeatherFrame(tk.Frame):
 
         # World & Weather Tab
         # World Config
-        self.world_control_frame = ttk.Frame(self, style="new.TFrame")
-        self.world_control_frame.pack(expand=1, fill="both", padx=18, pady=(18, 12))
+        self.world_control_frame = ttk.LabelFrame(
+            self,
+            text="World & Map",
+            style="Section.TLabelframe",
+            padding=(12, 8)
+        )
+        self.world_control_frame.pack(fill="x", padx=18, pady=(10, 6))
         self.world_control_frame_selection = ttk.Frame(self.world_control_frame, style="new.TFrame")
         self.world_control_frame_image = ttk.Frame(self.world_control_frame, style="new.TFrame")
-        self.world_control_frame_selection.grid(row=0, column=0, sticky="n", padx=(18, 12), pady=(12, 0))
-        self.world_control_frame_image.grid(row=0, column=1, sticky="n", padx=(12, 18), pady=(12, 0))
-        self.world_control_frame.grid_columnconfigure(0, weight=1)
-        self.world_control_frame.grid_columnconfigure(1, weight=2)
+        self.world_control_frame_selection.grid(row=0, column=0, sticky="nsw", padx=(8, 20), pady=(2, 4))
+        self.world_control_frame_image.grid(row=0, column=1, sticky="nsew", padx=8, pady=(2, 4))
+        self.world_control_frame.grid_columnconfigure(0, weight=0)
+        self.world_control_frame.grid_columnconfigure(1, weight=1)
+        self.world_control_frame.grid_rowconfigure(0, weight=1)
         self.map_display = None
         self.display = None
         self.disp_label = None
         self._world_control_frame_setup()
 
         # Weather Config
-        self.weather_control_frame = ttk.Frame(self, style="new.TFrame")
-        self.weather_control_frame.pack(expand=1, fill="both", padx=18, pady=(6, 18))
+        self.weather_control_frame = ttk.LabelFrame(
+            self,
+            text="Weather Parameters",
+            style="Section.TLabelframe",
+            padding=(12, 8)
+        )
+        self.weather_control_frame.pack(expand=1, fill="both", padx=18, pady=(6, 12))
         self._weather_variables_definition()
         self._weather_control_frame_setup()
 
     def _world_control_frame_setup(self):
         heading = tk.Label(self.world_control_frame_selection, text="World Control", bg=self.default_color,
                            fg=self.text_color, font=("Arial", 18, "bold"))
-        heading.grid(row=0, column=0, sticky="NW", pady=(0, 10))
+        heading.grid(row=0, column=0, sticky="NW", pady=(0, 6))
 
         heading2 = tk.Label(self.world_control_frame_selection, text="Map select:", bg=self.default_color,
                             fg=self.text_color, font=("Arial", 12, "bold"))
@@ -51,19 +62,20 @@ class CustomWorldAndWeatherFrame(tk.Frame):
                                            textvariable=self.selected_map)
         select_map_combobox["values"] = list(self.database.world_lib)[:-1]
         select_map_combobox.current(0)
-        select_map_combobox.grid(row=2, column=0)
+        select_map_combobox.grid(row=2, column=0, sticky="ew")
         select_map_combobox.bind("<<ComboboxSelected>>", self.update_image)
 
         apply_button = ttk.Button(self.world_control_frame_selection, text="Apply", command=self._apply_world,
                                   width=10)
-        apply_button.grid(row=3, column=0, pady=10)
+        apply_button.grid(row=3, column=0, sticky="w", pady=(12, 0))
 
-        self.map_display = Image.open("images/maps/" + self.selected_map.get() + ".png")
+        self.map_display = self._load_map_image()
         self.display = ImageTk.PhotoImage(self.map_display)
         self.disp_label = tk.Label(self.world_control_frame_image, image=self.display, bg=self.panel_color,
                                    highlightthickness=0)
-        self.disp_label.grid(row=0, column=0, pady=10, padx=10, sticky="nsew")
+        self.disp_label.grid(row=0, column=0, sticky="nsew")
         self.world_control_frame_image.grid_columnconfigure(0, weight=1)
+        self.world_control_frame_image.grid_rowconfigure(0, weight=1)
 
     def _weather_variables_definition(self):
         weather = self.database.actual_weather_data
@@ -119,167 +131,105 @@ class CustomWorldAndWeatherFrame(tk.Frame):
         self.dust_storm_var.set(value=weather["dust_storm"])
 
     def _weather_control_frame_setup(self):
-        # ===================================== Heading ========================================
-        row = 0
-        col = 0
-        heading = tk.Label(self.weather_control_frame, text="Weather Control", bg=self.default_color,
-                           fg=self.text_color, font=("Arial", 18, "bold"))
-        heading.grid(row=row, column=col, sticky="NW", padx=18, pady=(18, 8))
+        heading = tk.Label(
+            self.weather_control_frame,
+            text="Weather Control",
+            bg=self.default_color,
+            fg=self.text_color,
+            font=("Arial", 18, "bold")
+        )
+        heading.grid(row=0, column=0, columnspan=3, sticky="w", padx=8, pady=(2, 6))
 
-        # ===================================== Weather preset ========================================
-        row = 1
-        label_weather_presets = tk.Label(self.weather_control_frame, text="Custom Presets", bg=self.default_color,
-                                         fg=self.text_color, font=("Arial", 12, "bold"))
-        label_weather_presets.grid(row=row, column=col, sticky="W", padx=18)
+        preset_label = tk.Label(
+            self.weather_control_frame,
+            text="Custom Presets",
+            bg=self.default_color,
+            fg=self.text_color,
+            font=("Arial", 10, "bold")
+        )
+        preset_label.grid(row=1, column=0, sticky="w", padx=(8, 6), pady=(0, 6))
         self.selected_weather_preset = tk.StringVar()
-        row += 1
-        select_weather_preset_combobox = ttk.Combobox(self.weather_control_frame, width=27,
-                                                      textvariable=self.selected_weather_preset)
+        select_weather_preset_combobox = ttk.Combobox(
+            self.weather_control_frame,
+            width=27,
+            textvariable=self.selected_weather_preset
+        )
         select_weather_preset_combobox["values"] = list(self.weather_presets_data.keys())[:-1]
         select_weather_preset_combobox.current(0)
-        select_weather_preset_combobox.grid(row=row, column=col, sticky="W", padx=18)
+        select_weather_preset_combobox.grid(row=1, column=1, sticky="w", padx=(0, 8), pady=(0, 6))
         select_weather_preset_combobox.bind("<<ComboboxSelected>>", self.update_weather_variables)
 
-        # ===================================== Cloudiness =====================================
-        row += 1
-        label_cloudiness = tk.Label(self.weather_control_frame, text="Cloudiness (0-100)", bg=self.default_color,
-                                    font=("Arial", 12))
-        label_cloudiness.grid(row=row, column=col, sticky="W")
-        spinbox_cloudiness = tk.Spinbox(self.weather_control_frame, from_=0, to=100, increment=0.1,
-                                        textvariable=self.cloudiness_var)
-        row += 1
-        spinbox_cloudiness.grid(row=row, column=col, sticky="W")
-        # ================================ Precipitation Deposits ============================
-        row += 1
-        label_precipitation_deposits = tk.Label(self.weather_control_frame, text="Precipitation Deposits (0-100)",
-                                                bg=self.default_color, font=("Arial", 12))
-        label_precipitation_deposits.grid(row=row, column=col, sticky="W", pady=(8, 0))
-        spinbox_precipitation_deposits = tk.Spinbox(self.weather_control_frame, from_=0, to=100, increment=0.1,
-                                                    textvariable=self.precipitation_deposits_var)
-        row += 1
-        spinbox_precipitation_deposits.grid(row=row, column=col, sticky="W")
-        # =============================== Sun azimuth angle ==================================
-        row += 1
-        label_sun_azimuth_angle = tk.Label(self.weather_control_frame, text="Sun Azimuth Angle (0-360)",
-                                           bg=self.default_color, font=("Arial", 12))
-        label_sun_azimuth_angle.grid(row=row, column=col, sticky="W", pady=(8, 0))
-        spinbox_sun_azimuth_angle = tk.Spinbox(self.weather_control_frame, from_=0, to=360, increment=0.1,
-                                               textvariable=self.sun_azimuth_angle_var)
-        row += 1
-        spinbox_sun_azimuth_angle.grid(row=row, column=col, sticky="W")
-        # =============================== Fog density ========================================
-        row += 1
-        label_fog_density = tk.Label(self.weather_control_frame, text="Fog Density (0-100)",
-                                     bg=self.default_color, font=("Arial", 12))
-        label_fog_density.grid(row=row, column=col, sticky="W", pady=(8, 0))
-        spinbox_fog_density = tk.Spinbox(self.weather_control_frame, from_=0, to=100, increment=0.1,
-                                         textvariable=self.fog_density_var)
-        row += 1
-        spinbox_fog_density.grid(row=row, column=col, sticky="W")
-        # =============================== Fog falloff ========================================
-        row += 1
-        label_fog_falloff = tk.Label(self.weather_control_frame, text="Fog Falloff (>0)",
-                                     bg=self.default_color, font=("Arial", 12))
-        label_fog_falloff.grid(row=row, column=col, sticky="W", pady=(8, 0))
-        spinbox_fog_falloff = tk.Spinbox(self.weather_control_frame, from_=0, to=1e12, increment=0.00001,
-                                         textvariable=self.fog_falloff_var)
-        row += 1
-        spinbox_fog_falloff.grid(row=row, column=col, sticky="W")
-        # ================================= Scattering intensity =============================
-        row += 1
-        label_scattering_intensity = tk.Label(self.weather_control_frame, text="Scattering Intensity (>0)",
-                                              bg=self.default_color, font=("Arial", 12))
-        label_scattering_intensity.grid(row=row, column=col, sticky="W", pady=(8, 0))
-        spinbox_scattering_intensity = tk.Spinbox(self.weather_control_frame, from_=0, to=1e9, increment=0.000001,
-                                                  textvariable=self.scattering_intensity_var)
-        row += 1
-        spinbox_scattering_intensity.grid(row=row, column=col, sticky="W")
-        # ================================= Mie scattering Scale =============================
-        row += 1
-        label_mie_scattering_scale = tk.Label(self.weather_control_frame, text="Mie Scattering Scale (>0)",
-                                              bg=self.default_color, font=("Arial", 12))
-        label_mie_scattering_scale.grid(row=row, column=col, sticky="W", pady=(8, 0))
-        spinbox_mie_scattering_scale = tk.Spinbox(self.weather_control_frame, from_=0, to=1e9, increment=0.0001,
-                                                  textvariable=self.mie_scattering_scale_var)
-        row += 1
-        spinbox_mie_scattering_scale.grid(row=row, column=col, sticky="W")
-        # ================================= Precipitation ====================================
-        row = 3
-        col = 1
-        label_precipitation = tk.Label(self.weather_control_frame, text="Precipitation (0-100)",
-                                       bg=self.default_color, font=("Arial", 12))
-        label_precipitation.grid(row=row, column=col, sticky="W", pady=(8, 0), padx=(30, 0))
-        spinbox_precipitation = tk.Spinbox(self.weather_control_frame, from_=0, to=100, increment=0.1,
-                                           textvariable=self.precipitation_var)
-        row += 1
-        spinbox_precipitation.grid(row=row, column=col, sticky="W", padx=(30, 0))
-        # ================================= Wind intensity ==================================
-        row += 1
-        label_wind_intensity = tk.Label(self.weather_control_frame, text="Wind Intensity (0-100)",
-                                        bg=self.default_color, font=("Arial", 12))
-        label_wind_intensity.grid(row=row, column=col, sticky="W", pady=(8, 0), padx=(30, 0))
-        spinbox_wind_intensity = tk.Spinbox(self.weather_control_frame, from_=0, to=100, increment=0.1,
-                                            textvariable=self.wind_intensity_var)
-        row += 1
-        spinbox_wind_intensity.grid(row=row, column=col, sticky="W", padx=(30, 0))
-        # =============================== Sun altitude angle ======================================
-        row += 1
-        label_sun_altitude_angle = tk.Label(self.weather_control_frame, text="Sun Altitude (-90-90)",
-                                            bg=self.default_color, font=("Arial", 12))
-        label_sun_altitude_angle.grid(row=row, column=col, sticky="W", pady=(8, 0), padx=(30, 0))
-        spinbox_sun_altitude_angle = tk.Spinbox(self.weather_control_frame, from_=-90, to=90, increment=0.1,
-                                                textvariable=self.sun_altitude_angle_var)
-        row += 1
-        spinbox_sun_altitude_angle.grid(row=row, column=col, sticky="W", padx=(30, 0))
-        # ================================== Fog distance ========================================
-        row += 1
-        label_fog_density = tk.Label(self.weather_control_frame, text="Fog Density (>0)",
-                                     bg=self.default_color, font=("Arial", 12))
-        label_fog_density.grid(row=row, column=col, sticky="W", pady=(8, 0), padx=(30, 0))
-        spinbox_fog_density = tk.Spinbox(self.weather_control_frame, from_=0, to=1e12, increment=0.0001,
-                                         textvariable=self.fog_density_var)
-        row += 1
-        spinbox_fog_density.grid(row=row, column=col, sticky="W", padx=(30, 0))
-        # ================================= Wetness =============================================
-        row += 1
-        label_wetness = tk.Label(self.weather_control_frame, text="Wetness (0-100)",
-                                 bg=self.default_color, font=("Arial", 12))
-        label_wetness.grid(row=row, column=col, sticky="W", pady=(8, 0), padx=(30, 0))
-        spinbox_wetness = tk.Spinbox(self.weather_control_frame, from_=0, to=100, increment=0.1,
-                                     textvariable=self.wetness_var)
-        row += 1
-        spinbox_wetness.grid(row=row, column=col, sticky="W", padx=(30, 0))
-        # =============================== Rayleigh scattering scale ============================
-        row += 1
-        label_rayleigh_scattering_scale = tk.Label(self.weather_control_frame,
-                                                   text="Rayleigh Scattering Scale (>0)",
-                                                   bg=self.default_color, font=("Arial", 12))
-        label_rayleigh_scattering_scale.grid(row=row, column=col, sticky="W", pady=(8, 0), padx=(30, 0))
-        spinbox_rayleigh_scattering_scale = tk.Spinbox(self.weather_control_frame, from_=0, to=1e9, increment=0.001,
-                                                       textvariable=self.rayleigh_scattering_scale_var)
-        row += 1
-        spinbox_rayleigh_scattering_scale.grid(row=row, column=col, sticky="W", padx=(30, 0))
-        # =============================== Dust storm ==========================================
-        row += 1
-        label_dust_storm = tk.Label(self.weather_control_frame, text="Dust Storm (0-100)",
-                                    bg=self.default_color, font=("Arial", 12))
-        label_dust_storm.grid(row=row, column=col, sticky="W", pady=(8, 0), padx=(30, 0))
-        spinbox_dust_storm = tk.Spinbox(self.weather_control_frame, from_=0, to=100, increment=0.1,
-                                        textvariable=self.dust_storm_var)
-        row += 1
-        spinbox_dust_storm.grid(row=row, column=col, sticky="W", padx=(30, 0))
+        weather_columns = (
+            (
+                ("Cloudiness (0-100)", self.cloudiness_var, 0, 100, 0.1),
+                ("Precipitation Deposits (0-100)", self.precipitation_deposits_var, 0, 100, 0.1),
+                ("Sun Azimuth Angle (0-360)", self.sun_azimuth_angle_var, 0, 360, 0.1),
+                ("Fog Density (0-100)", self.fog_density_var, 0, 100, 0.1),
+                ("Fog Falloff (>0)", self.fog_falloff_var, 0, 1e12, 0.00001),
+            ),
+            (
+                ("Precipitation (0-100)", self.precipitation_var, 0, 100, 0.1),
+                ("Wind Intensity (0-100)", self.wind_intensity_var, 0, 100, 0.1),
+                ("Sun Altitude (-90-90)", self.sun_altitude_angle_var, -90, 90, 0.1),
+                ("Fog Distance (>0)", self.fog_distance_var, 0, 1e12, 0.0001),
+                ("Wetness (0-100)", self.wetness_var, 0, 100, 0.1),
+            ),
+            (
+                ("Scattering Intensity (>0)", self.scattering_intensity_var, 0, 1e9, 0.000001),
+                ("Mie Scattering Scale (>0)", self.mie_scattering_scale_var, 0, 1e9, 0.0001),
+                ("Rayleigh Scattering Scale (>0)", self.rayleigh_scattering_scale_var, 0, 1e9, 0.001),
+                ("Dust Storm (0-100)", self.dust_storm_var, 0, 100, 0.1),
+            ),
+            (
 
-        # =================================Apply button ========================================
-        row += 1
-        col = 0
-        apply_button = ttk.Button(self.weather_control_frame, text="Apply", command=self._apply_weather_data,
-                                  width=10)
-        apply_button.grid(row=row, column=col, pady=10)
+            ),
+        )
 
-        col += 1
-        refresh_button = ttk.Button(self.weather_control_frame, text="Refresh", command=self.reset_weather,
-                                    width=10)
-        refresh_button.grid(row=row, column=col, pady=10)
+        for column, weather_items in enumerate(weather_columns):
+            column_frame = ttk.Frame(self.weather_control_frame, style="new.TFrame")
+            column_frame.grid(row=2, column=column, sticky="new", padx=8, pady=(0, 4))
+            column_frame.grid_columnconfigure(0, weight=1)
+
+            for item_index, (label_text, variable, minimum, maximum, increment) in enumerate(weather_items):
+                row = item_index * 2
+                label = tk.Label(
+                    column_frame,
+                    text=label_text,
+                    bg=self.default_color,
+                    fg=self.text_color,
+                    font=("Arial", 10)
+                )
+                label.grid(row=row, column=0, sticky="w", pady=(4, 0))
+                spinbox = tk.Spinbox(
+                    column_frame,
+                    from_=minimum,
+                    to=maximum,
+                    increment=increment,
+                    textvariable=variable,
+                    font=("Arial", 10),
+                    width=20
+                )
+                spinbox.grid(row=row + 1, column=0, sticky="ew", pady=(0, 2))
+
+        button_frame = ttk.Frame(self.weather_control_frame, style="new.TFrame")
+        button_frame.grid(row=3, column=0, columnspan=3, sticky="e", padx=8, pady=(4, 2))
+        apply_button = ttk.Button(
+            button_frame,
+            text="Apply",
+            command=self._apply_weather_data,
+            width=10
+        )
+        apply_button.pack(side="left", padx=(0, 8))
+        refresh_button = ttk.Button(
+            button_frame,
+            text="Refresh",
+            command=self.reset_weather,
+            width=10
+        )
+        refresh_button.pack(side="left")
+
+        for column in range(3):
+            self.weather_control_frame.grid_columnconfigure(column, weight=1, uniform="weather")
 
     def update_weather_variables(self, event):
         new_weather_preset = self.weather_presets_data[self.selected_weather_preset.get()]
@@ -320,14 +270,15 @@ class CustomWorldAndWeatherFrame(tk.Frame):
         self.carla.change_weather(parse_weather_to_carla(weather_dict))
 
     def update_image(self, event):
-        self.map_display = Image.open(
-            "images/maps/" + self.selected_map.get() + ".png"
-        )
-
+        self.map_display = self._load_map_image()
         self.display = ImageTk.PhotoImage(self.map_display)
 
         self.disp_label.config(image=self.display)
         self.disp_label.image = self.display
+
+    def _load_map_image(self):
+        with Image.open("images/maps/" + self.selected_map.get() + ".png") as map_image:
+            return map_image.resize((450, 270), Image.Resampling.LANCZOS)
 
     def _apply_world(self):
         self.carla.change_world(self.selected_map.get())
