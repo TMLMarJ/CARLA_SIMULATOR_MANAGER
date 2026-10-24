@@ -14,6 +14,7 @@ class EntityEditWindow(tk.Toplevel):
         self.blueprint = blueprint_library.find(blueprint)
         self.entity = entity
         self.type = type
+        self.supports_vehicle_physics = type == "vehicle"
         self.on_apply = on_apply
         self.row = None
         self.column = None
@@ -59,11 +60,12 @@ class EntityEditWindow(tk.Toplevel):
         self.WheelsTab = ttk.Frame(self.tabControl)
 
         self.tabControl.add(self.BlueprintTab, text="Blueprint")
-        self.tabControl.add(self.PhysicsTab, text="Physics")
-        self.tabControl.add(self.GearsTab, text="Gears")
-        self.tabControl.add(self.TorqueTab, text="Torque Curve")
-        self.tabControl.add(self.SteeringTab, text="Steering Curve")
-        self.tabControl.add(self.WheelsTab, text="Wheels")
+        if self.supports_vehicle_physics:
+            self.tabControl.add(self.PhysicsTab, text="Physics")
+            self.tabControl.add(self.GearsTab, text="Gears")
+            self.tabControl.add(self.TorqueTab, text="Torque Curve")
+            self.tabControl.add(self.SteeringTab, text="Steering Curve")
+            self.tabControl.add(self.WheelsTab, text="Wheels")
         self.tabControl.pack(expand=1, fill="both")
 
         self.blueprint_parameters_frame = ttk.Frame(self.BlueprintTab)
@@ -75,16 +77,17 @@ class EntityEditWindow(tk.Toplevel):
 
         self.blueprint_parameters_frame.grid(row=0, column=0, sticky="nsew")
         self.create_blueprint_section()
-        self.physics_parameters_frame.grid(row=0, column=0, sticky="nsew")
-        self.create_physic_section()
-        self.wheels_parameters_frame.grid(row=0, column=0, sticky="nsew")
-        self.wheels_table = self.create_wheels_section()
-        self.gears_parameters_frame.grid(row=0, column=0, sticky="nsew")
-        self.gears_table = self.create_gears_section()
-        self.torque_parameters_frame.grid(row=0, column=0, sticky="nsew")
-        self.torque_table = self.create_torque_section()
-        self.steering_parameters_frame.grid(row=0, column=0, sticky="nsew")
-        self.steering_table = self.create_steering_section()
+        if self.supports_vehicle_physics:
+            self.physics_parameters_frame.grid(row=0, column=0, sticky="nsew")
+            self.create_physic_section()
+            self.wheels_parameters_frame.grid(row=0, column=0, sticky="nsew")
+            self.wheels_table = self.create_wheels_section()
+            self.gears_parameters_frame.grid(row=0, column=0, sticky="nsew")
+            self.gears_table = self.create_gears_section()
+            self.torque_parameters_frame.grid(row=0, column=0, sticky="nsew")
+            self.torque_table = self.create_torque_section()
+            self.steering_parameters_frame.grid(row=0, column=0, sticky="nsew")
+            self.steering_table = self.create_steering_section()
 
         self.button_frame = ttk.Frame(self)
         self.button_frame.pack(side="bottom", fill="x", pady=10)
@@ -293,7 +296,9 @@ class EntityEditWindow(tk.Toplevel):
         blueprint_data = {}
 
         for attr_id, attr_info in self.attribute_vars.items():
-            if attr_info["type"] == carla.ActorAttributeType.Int:
+            if attr_info["type"] == carla.ActorAttributeType.Bool:
+                blueprint_data[attr_id] = attr_info["var"].get()
+            elif attr_info["type"] == carla.ActorAttributeType.Int:
                 blueprint_data[attr_id] = attr_info["var"].get()
             elif attr_info["type"] == carla.ActorAttributeType.Float:
                 blueprint_data[attr_id] = float(attr_info["var"].get())
@@ -302,6 +307,9 @@ class EntityEditWindow(tk.Toplevel):
             elif attr_info["type"] == carla.ActorAttributeType.RGBColor:
                 blueprint_data[attr_id] = hex_to_rgb(attr_info["widget"].color)
                 print(blueprint_data[attr_id])
+
+        if not self.supports_vehicle_physics:
+            return {"blueprint": blueprint_data, "physics": None}
 
         # Physics data
         max_rpm = self.physics_vars["max_rpm"].get()

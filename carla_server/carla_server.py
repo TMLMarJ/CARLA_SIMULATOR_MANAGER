@@ -76,7 +76,7 @@ class CarlaController:
                 if self.database.blueprint_new_data is not None:
                     for attr_name, attr_value in self.database.blueprint_new_data.items():
                         if bp.has_attribute(attr_name):
-                            bp.set_attribute(attr_name, attr_value)
+                            bp.set_attribute(attr_name, str(attr_value))
                     self.database.blueprint_new_data = None
 
                 actor = world.try_spawn_actor(bp, transform)
@@ -150,7 +150,10 @@ class CarlaController:
                 world = self.client.get_world()
                 world.set_weather(data)
 
-            if cmd == "spawn_preview_vehicle":
+            if cmd == "spawn_preview_actor":
+                # A preview can be requested more than once by GUI events. Always
+                # remove the previous actor and camera before creating a new pair.
+                self.cleanup_preview()
                 self.database.ghost_spawned = False
                 bp = blueprint_library.find(data["blueprint_id"])
                 transform = carla.Transform(
@@ -158,20 +161,32 @@ class CarlaController:
                         x=data["transform"].location.x,
                         y=data["transform"].location.y,
                         z=data["transform"].location.z
+                    ),
+                    carla.Rotation(
+                        yaw=data["transform"].rotation.yaw,
+                        pitch=data["transform"].rotation.pitch,
+                        roll=data["transform"].rotation.roll
                     )
                 )
 
                 actor = world.try_spawn_actor(bp, transform)
+                if actor is None:
+                    offset_z = 5
+                    transform.location.z += offset_z
+                    actor = world.try_spawn_actor(bp, transform)
+
                 if actor is not None:
-                    self.database.ghost_physic = actor.get_physics_control()
-                    actor.set_simulate_physics(False)
                     self.database.ghost_data = actor
+                    if actor.type_id.startswith("vehicle."):
+                        self.database.ghost_physic = actor.get_physics_control()
+                    actor.set_simulate_physics(False)
                     actor.set_enable_gravity(False)
                     camera_bp = self.database.blueprint_lib.find('sensor.camera.rgb')
 
                     camera_bp.set_attribute("image_size_x", "640")
                     camera_bp.set_attribute("image_size_y", "480")
                     camera_bp.set_attribute("fov", "70")
+                    camera_bp.set_attribute("sensor_tick", "0.1")
 
                     camera_transform = carla.Transform(
                         carla.Location(
@@ -188,7 +203,7 @@ class CarlaController:
 
                     self.database.ghost_camera = self.client.get_world().spawn_actor(camera_bp, camera_transform)
 
-                    self.database.ghost_camera.listen(self.controller.main_view.vehicle_frame.vehicle_preview.on_camera_image)
+                    self.database.ghost_camera.listen(data["image_callback"])
                     self.database.ghost_spawned = True
 
             if cmd == "set_ghost_transform":
@@ -215,7 +230,7 @@ class CarlaController:
                         self.database.ghost_data = ghost_actor
                         self.database.ghost_camera = camera
 
-            if cmd == "destroy_preview_vehicle":
+            if cmd == "destroy_preview_actor":
                 if self.database.ghost_camera is not None:
                     self.database.ghost_camera.stop()
                     self.database.ghost_camera.destroy()
@@ -226,7 +241,7 @@ class CarlaController:
                     self.database.ghost_physic = None
                     self.database.ghost_data = None
 
-            if cmd == "update_preview_vehicle_model":
+            if cmd == "update_preview_actor_model":
                 if self.database.ghost_data is not None:
                     ghost_actor = self.database.ghost_data
                     transform = ghost_actor.get_transform()
@@ -264,44 +279,46 @@ class CarlaController:
                 physics_control = data
                 if self.database.ghost_data is not None:
                     ghost_actor = self.database.ghost_data
-                    ghost_actor.apply_physics_control(physics_control)
+                    if physics_control is not None:
+                        ghost_actor.apply_physics_control(physics_control)
                     ghost_type = ghost_actor.type_id
-                    self.update_preview_vehicle_model(ghost_type)
+                    self.command_queue.put(("update_preview_actor_model", ghost_type))
                     self.database.physics_applied = True
 
-            if cmd == "change_vehicle_model":
-                blueprint_id, vehicle_id = data
+            if cmd == "change_actor_model":
+                blueprint_id, actor_id = data
                 with self.database.lock:
-                    if vehicle_id in self.database.actors_db.actors:
-                        actor = self.database.actors_db.actors[vehicle_id]
+                    if actor_id in self.database.actors_db.actors:
+                        actor = self.database.actors_db.actors[actor_id]
                         transform = actor.get_transform()
-                        name = self.database.actors_db.actors_db[vehicle_id].user_name
-                        physics = actor.get_physics_control()
+                        name = self.database.actors_db.actors_db[actor_id].user_name
+                        physics = actor.get_physics_control() if actor.type_id.startswith("vehicle.") else None
                         actor.destroy()
                         bp = blueprint_library.find(blueprint_id)
                         is_destroyed = wait_and_try(lambda: not actor.is_alive, timeout=5, interval=0.5)
                         if not is_destroyed:
-                            print(f"Failed to destroy actor {vehicle_id}.")
+                            print(f"Failed to destroy actor {actor_id}.")
                         if is_destroyed:
                             transform.location.z = transform.location.z + 0.5
                             new_actor = world.spawn_actor(bp, transform)
                             if new_actor is not None:
                                 del self.database.actors_db.actors[actor.id]
-                                new_actor.apply_physics_control(physics)
+                                if physics is not None:
+                                    new_actor.apply_physics_control(physics)
                                 self.database.add_actor(new_actor, name)
                                 self.database.spawned_actor_id = new_actor.id
-                                print(f"Actor {vehicle_id} changed to {blueprint_id} successfully.")
+                                print(f"Actor {actor_id} changed to {blueprint_id} successfully.")
                             else:
-                                print(f"Failed to change actor {vehicle_id} to {blueprint_id}.")
+                                print(f"Failed to change actor {actor_id} to {blueprint_id}.")
                                 del self.database.actors_db.actors[actor.id]
 
-            if cmd == "set_vehicle_transform":
-                transform, vehicle_id = data
+            if cmd == "set_actor_transform":
+                transform, actor_id = data
                 with self.database.lock:
-                    if vehicle_id in self.database.actors_db.actors:
-                        actor = self.database.actors_db.actors[vehicle_id]
+                    if actor_id in self.database.actors_db.actors:
+                        actor = self.database.actors_db.actors[actor_id]
                         actor.set_transform(transform)
-                        self.database.actors_db.actors_db[vehicle_id].transform = transform
+                        self.database.actors_db.actors_db[actor_id].transform = transform
 
         self.cleanup_preview()
         self.data_ready = False
@@ -351,21 +368,22 @@ class CarlaController:
     def change_weather(self, new_weather):
         self.command_queue.put(("change_weather", new_weather))
 
-    def spawn_preview_vehicle(self, blueprint_id, transform):
-        self.command_queue.put(("spawn_preview_vehicle", {
+    def spawn_preview_actor(self, blueprint_id, transform, image_callback):
+        self.command_queue.put(("spawn_preview_actor", {
             "blueprint_id": blueprint_id,
             "transform": transform,
+            "image_callback": image_callback,
         }))
 
     def set_ghost_transform(self, transform):
         self.command_queue.put(("set_ghost_transform", transform))
 
-    def destroy_preview_vehicle(self):
-        self.command_queue.put(("destroy_preview_vehicle", None))
+    def destroy_preview_actor(self):
+        self.command_queue.put(("destroy_preview_actor", None))
 
-    def update_preview_vehicle_model(self, blueprint_id):
+    def update_preview_actor_model(self, blueprint_id):
         self.command_queue.put(
-            ("update_preview_vehicle_model", blueprint_id)
+            ("update_preview_actor_model", blueprint_id)
         )
 
     def remove_actor(self, actor_id):
@@ -374,8 +392,8 @@ class CarlaController:
     def apply_new_physics_and_blueprint_to_ghost(self, physics_control):
         self.command_queue.put(("apply_new_physics_and_blueprint_to_ghost", physics_control))
 
-    def change_vehicle_model(self, blueprint_id, vehicle_id):
-        self.command_queue.put(("change_vehicle_model", [blueprint_id, vehicle_id]))
+    def change_actor_model(self, blueprint_id, actor_id):
+        self.command_queue.put(("change_actor_model", [blueprint_id, actor_id]))
 
-    def set_vehicle_transform(self, new_transform, vehicle_id):
-        self.command_queue.put(("set_vehicle_transform", [new_transform, vehicle_id]))
+    def set_actor_transform(self, new_transform, actor_id):
+        self.command_queue.put(("set_actor_transform", [new_transform, actor_id]))

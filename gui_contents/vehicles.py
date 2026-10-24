@@ -5,7 +5,7 @@ from PIL import Image, ImageTk
 from pygments.lexers import blueprint
 
 from utilities.functions import filter_carla_id_by_type, return_data_from_transform, wait_and_try
-from gui_contents.vehicle_spawn_preview import VehiclePreviewFrame, VehiclePreview
+from gui_contents.spawn_preview import VehiclePreviewFrame, GhostPreview
 from gui_contents.ActorEditView import EntityEditWindow
 from gui_contents.change_model_top import ChangeModelTop
 from gui_contents.set_transform_top import ChangeTransformTop
@@ -27,21 +27,13 @@ class CustomVehicleFrame(tk.Frame):
         self.text_color = "#4A2E1D"
         self.subtle_color = "#E7B36C"
 
-        self.vehicle_preview = VehiclePreview(self.database, controller)
+        self.vehicle_preview = GhostPreview(self.database, controller)
 
         self._vehicle_variables_definition()
         self._vehicle_frame_setup()
 
     def spawn_ghost(self, blueprint_id="vehicle.audi.a2", transform=None):
         self.vehicle_preview.spawn(blueprint_id=blueprint_id, transform=transform)
-        self.after(500, self.image_frame.update_image)
-        is_spawned = wait_and_try(
-            lambda: self.database.ghost_spawned == True
-        )
-        if is_spawned:
-            print("Ghost vehicle spawned successfully.")
-        else:
-            print("Failed to spawn ghost vehicle.")
 
     def _vehicle_variables_definition(self):
         self.vehicle_name_var = tk.StringVar(value="Ghost Vehicle")
@@ -258,7 +250,7 @@ class CustomVehicleFrame(tk.Frame):
         if not selected_vehicle:
             return
         selected_vehicle_id = self.vehicle_table.tree.item(selected_vehicle)["values"][1]
-        self.controller.carla.set_vehicle_transform(transform, selected_vehicle_id)
+        self.controller.carla.set_actor_transform(transform, selected_vehicle_id)
         self.vehicle_table.tree.item(selected_vehicle, values=(
             self.vehicle_table.tree.item(selected_vehicle)["values"][0],
             self.vehicle_table.tree.item(selected_vehicle)["values"][1],
@@ -284,7 +276,7 @@ class CustomVehicleFrame(tk.Frame):
         actor_model = filter_carla_id_by_type("vehicle", selected_class, self.database.blueprint_lib)
         blueprint_id = actor_model[selected_model]
         selected_vehicle_id = self.vehicle_table.tree.item(selected_vehicle)["values"][1]
-        self.controller.carla.change_vehicle_model(blueprint_id, self.database.actors_db.actors[selected_vehicle_id].id)
+        self.controller.carla.change_actor_model(blueprint_id, self.database.actors_db.actors[selected_vehicle_id].id)
 
         try:
             is_changed = wait_and_try(
@@ -337,7 +329,6 @@ class CustomVehicleFrame(tk.Frame):
 
         if self.vehicle_preview:
             self.vehicle_preview.set_transform(transform)
-            self.after(500, self.image_frame.update_image)
 
     def update_spawn_point(self):
         self.combobox_spawn_points["values"] = [f"{i}:{point}" for i, point in enumerate(self.database.available_spawn_points)]
@@ -353,7 +344,6 @@ class CustomVehicleFrame(tk.Frame):
             transform = self.vehicle_preview.get_transform()
             self.destroy_ghost()
             self.spawn_ghost(blueprint_id=selected_model, transform=transform)
-            self.after(500, self.image_frame.update_image)
 
     def get_vehicle_info(self):
         vehicle_name = self.vehicle_name_var.get()

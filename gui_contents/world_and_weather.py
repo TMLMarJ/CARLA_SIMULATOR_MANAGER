@@ -288,7 +288,8 @@ class CustomWorldAndWeatherFrame(tk.Frame):
         if is_changed:
             self.reset_weather()
             self.controller.vehicle_frame.update_spawn_point()
+            self.controller.actor_frame.update_spawn_point()
+            self.controller.static_object_frame.update_spawn_point()
         else:
             messagebox.showerror("Error changing map", "Timeout changing map, variables could not be changed, refresh values manually!")
 
-    

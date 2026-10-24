@@ -2,7 +2,7 @@ import tkinter as tk
 from tkinter import ttk
 
 from utilities.functions import filter_carla_id_by_type, return_data_from_transform, wait_and_try
-from gui_contents.vehicle_spawn_preview import VehiclePreviewFrame, VehiclePreview
+from gui_contents.spawn_preview import VehiclePreviewFrame, GhostPreview
 from gui_contents.ActorEditView import EntityEditWindow
 from gui_contents.change_model_top import ChangeModelTop
 from gui_contents.set_transform_top import ChangeTransformTop

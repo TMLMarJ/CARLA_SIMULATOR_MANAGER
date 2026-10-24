@@ -8,7 +8,18 @@ def filter_carla_id_by_type(actor: str, type_base: str, blueprint_lib: carla.Blu
     filtered = blueprint_lib.filter(f'{actor}.*')
     selected = {}
     for bp in filtered:
-        if bp.has_attribute('base_type'):
+        if actor == "walker":
+            bp_id = bp.id
+            _, pedestrian, number = str(bp_id).split('.')
+            selected[f"{pedestrian.capitalize()}:{number}"] = bp_id
+        elif actor == "static":
+            bp_id = bp.id
+            blueprint_parts = str(bp_id).split('.')
+            if len(blueprint_parts) < 3 or blueprint_parts[1] != "prop":
+                continue
+            model_name = " ".join(blueprint_parts[2:])
+            selected[model_name.replace('_', ' ').title()] = bp_id
+        elif bp.has_attribute('base_type'):
             if bp.get_attribute('base_type').as_str() == type_base or bp.get_attribute('base_type').as_str() == type_base.capitalize():
                 bp_id = bp.id
                 base, brand, model = str(bp_id).split('.')
