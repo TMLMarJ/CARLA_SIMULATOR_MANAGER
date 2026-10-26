@@ -282,14 +282,27 @@ class CustomWorldAndWeatherFrame(tk.Frame):
 
     def _apply_world(self):
         self.carla.change_world(self.selected_map.get())
-        is_changed = wait_and_try(
-            lambda: self.database.world_changed == True,
+        is_finished = wait_and_try(
+            lambda: self.carla.world_changed_event.is_set(),
         )
-        if is_changed:
+        if is_finished:
+            self.controller.vehicle_frame.actor_table.refresh_table()
+            self.controller.actor_frame.actor_table.refresh_table()
+            self.controller.static_object_frame.actor_table.refresh_table()
+            self.controller.sensor_frame.refresh_table()
+
+        if is_finished and self.database.world_changed:
             self.reset_weather()
             self.controller.vehicle_frame.update_spawn_point()
             self.controller.actor_frame.update_spawn_point()
             self.controller.static_object_frame.update_spawn_point()
-        else:
-            messagebox.showerror("Error changing map", "Timeout changing map, variables could not be changed, refresh values manually!")
 
+            active_preview_frame = self.controller.active_preview_frame
+            if active_preview_frame is not None:
+                self.controller._set_active_preview(None)
+                self.controller._set_active_preview(active_preview_frame)
+        else:
+            error = self.database.world_change_error
+            if error is None:
+                error = "Timeout changing map, variables could not be changed."
+            messagebox.showerror("Error changing map", error)

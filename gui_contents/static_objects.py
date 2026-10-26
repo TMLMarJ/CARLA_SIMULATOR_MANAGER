@@ -135,9 +135,6 @@ class CustomStaticObjectFrame(tk.Frame):
         ttk.Button(button_frame, text="Edit", command=self.edit_actor, width=18).grid(
             row=0, column=1, sticky="ew", padx=(0, 10), pady=(0, 8)
         )
-        ttk.Button(button_frame, text="Attach Sensor", command=self.attach_sensor, width=18).grid(
-            row=0, column=2, sticky="ew", padx=(0, 10), pady=(0, 8)
-        )
         ttk.Button(button_control_frame, text="Remove", command=self.remove_actor, width=18).grid(
             row=0, column=0, sticky="ew", padx=(0, 10), pady=(0, 8)
         )
@@ -366,9 +363,6 @@ class CustomStaticObjectFrame(tk.Frame):
             self.roll_position_var.set(roll)
             self.combobox_spawn_points.current(0)
 
-    def attach_sensor(self):
-        pass
-
     def set_variables_from_table(self, event=None):
         selected_actor = self.actor_table.tree.selection()
         if not selected_actor:
@@ -500,3 +494,8 @@ class StaticObjectTable(ttk.Frame):
                         "is_active": "Active" if actor_info.is_alive else "Inactive",
                     }
                 )
+
+    def refresh_table(self):
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        self.initialize_data()

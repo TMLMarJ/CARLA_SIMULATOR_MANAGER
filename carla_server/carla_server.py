@@ -17,6 +17,7 @@ class CarlaController:
         self.host = host
         self.port = port
         self.shutdown_request = False
+        self.sensor_preview_ids = set()
 
     def start(self):
         self.thread = threading.Thread(target=self.run, daemon=True)
@@ -96,55 +97,67 @@ class CarlaController:
                         print(f"Actor {data['name']} spawned with ID {actor.id}")
 
             if cmd == "change_world":
-                for actor in self.database.actors_db.actors.values():
-                    try:
-                        actor.destroy()
-                    except:
-                        pass
                 self.world_changed_event.clear()
                 self.database.world_changed = False
+                self.database.world_change_error = None
                 self.client.set_timeout(30.0)
 
                 try:
-                    world = self.client.load_world(data)
-                except RuntimeError:
-                    print("load_world timeout, waiting for server...")
+                    try:
+                        new_world = self.client.load_world(data)
+                    except RuntimeError:
+                        print("load_world timeout, waiting for server...")
+                        new_world = None
 
-                    world = None
+                        for i in range(10):
+                            try:
+                                current_world = self.client.get_world()
+                                map_name = current_world.get_map().name.split("/")[-1]
+                                print(f"Attempt {i + 1}: {map_name}")
+                                if map_name == data:
+                                    new_world = current_world
+                                    print("Map changed successfully")
+                                    break
+                            except RuntimeError:
+                                print(f"Attempt {i + 1}: server not ready")
+                            time.sleep(1)
 
-                    for i in range(10):
-                        try:
-                            world = self.client.get_world()
-
-                            map_name = world.get_map().name.split("/")[-1]
-
-                            print(f"Attempt {i + 1}: {map_name}")
-
-                            if map_name == data:
-                                print("Map changed successfully")
-                                break
-
-                        except RuntimeError as e:
-                            print(f"Attempt {i + 1}: server not ready")
-
-                        time.sleep(1)
-
-                    if world is None or world.get_map().name.split("/")[-1] != data:
+                    if (
+                        new_world is None or
+                        new_world.get_map().name.split("/")[-1] != data
+                    ):
                         raise RuntimeError(f"Failed to load map: {data}")
 
+                    new_blueprint_library = new_world.get_blueprint_library()
+                    world = new_world
+                    blueprint_library = new_blueprint_library
+
+                    self.cleanup_sensor_previews()
+                    self.cleanup_preview()
+                    with self.database.lock:
+                        self.database.actors_db.clear()
+                        self.database.sensors_db.clear()
+                        self.database.spawned_actor_id = None
+                        self.database.world = new_world
+                        self.database.blueprint_lib = new_blueprint_library
+                    self.database.sensor_event_queue.put(("sensors_cleared", None))
+
+                    new_world_library = self.client.get_available_maps()
+                    new_weather = new_world.get_weather()
+                    new_weather_data = parse_weather_to_dict(new_weather)
+                    new_spawn_points = new_world.get_map().get_spawn_points()
+
+                    with self.database.lock:
+                        self.database.world_lib = new_world_library
+                        self.database.actual_weather_data = new_weather_data
+                        self.database.available_spawn_points = new_spawn_points
+                        self.database.world_changed = True
+                except Exception as e:
+                    self.database.world_change_error = str(e)
+                    print(f"Error changing map: {e}")
                 finally:
                     self.client.set_timeout(5.0)
-
-                self.client.set_timeout(5.0)
-                self.database.world = world
-                self.database.blueprint_lib = world.get_blueprint_library()
-                self.database.world_lib = self.client.get_available_maps()
-                weather = world.get_weather()
-                weather_data = parse_weather_to_dict(weather)
-                self.database.actual_weather_data = weather_data
-                self.database.available_spawn_points = world.get_map().get_spawn_points()
-                self.database.world_changed = True
-                self.world_changed_event.set()
+                    self.world_changed_event.set()
 
             if cmd == "change_weather":
                 world = self.client.get_world()
@@ -266,6 +279,7 @@ class CarlaController:
                 actor_id = data
                 with self.database.lock:
                     if actor_id in self.database.actors_db.actors:
+                        self.remove_sensors_for_parent(actor_id)
                         actor = self.database.actors_db.actors[actor_id]
                         try:
                             actor.destroy()
@@ -289,6 +303,7 @@ class CarlaController:
                 blueprint_id, actor_id = data
                 with self.database.lock:
                     if actor_id in self.database.actors_db.actors:
+                        self.remove_sensors_for_parent(actor_id)
                         actor = self.database.actors_db.actors[actor_id]
                         transform = actor.get_transform()
                         name = self.database.actors_db.actors_db[actor_id].user_name
@@ -320,6 +335,126 @@ class CarlaController:
                         actor.set_transform(transform)
                         self.database.actors_db.actors_db[actor_id].transform = transform
 
+            if cmd == "attach_sensor":
+                sensor = None
+                try:
+                    parent_id = data["parent_id"]
+                    with self.database.lock:
+                        parent_actor = self.database.actors_db.actors.get(parent_id)
+                    if parent_actor is None or not parent_actor.is_alive:
+                        raise RuntimeError("Parent actor is no longer available.")
+
+                    sensor_blueprint = self.database.blueprint_lib.find(data["blueprint_id"])
+                    for attr_name, attr_value in data["attributes"].items():
+                        if sensor_blueprint.has_attribute(attr_name):
+                            attribute = sensor_blueprint.get_attribute(attr_name)
+                            if attribute.is_modifiable:
+                                sensor_blueprint.set_attribute(attr_name, str(attr_value))
+
+                    sensor = self.database.world.spawn_actor(
+                        sensor_blueprint,
+                        data["transform"],
+                        attach_to=parent_actor,
+                        attachment_type=carla.AttachmentType.Rigid
+                    )
+                    if sensor is None:
+                        raise RuntimeError("CARLA did not create the sensor.")
+
+                    with self.database.lock:
+                        self.database.add_sensor(
+                            sensor,
+                            parent_id,
+                            data["name"],
+                            data["blueprint_id"],
+                            data["transform"],
+                            data["attributes"]
+                        )
+                    self.database.sensor_event_queue.put(("sensor_attached", sensor.id))
+                    print(f"Sensor {data['name']} spawned with ID {sensor.id}")
+                except Exception as e:
+                    if sensor is not None:
+                        try:
+                            sensor.destroy()
+                        except Exception:
+                            pass
+                    self.database.sensor_event_queue.put(("sensor_error", f"Could not add sensor: {e}"))
+
+            if cmd == "remove_sensor":
+                sensor_id = data
+                try:
+                    self.stop_sensor_preview_actor(sensor_id)
+                    with self.database.lock:
+                        sensor = self.database.sensors_db.sensors.get(sensor_id)
+                        if sensor is None:
+                            raise RuntimeError("Sensor is no longer available.")
+                        sensor.destroy()
+                        self.database.sensors_db.remove_sensor(sensor_id)
+                    self.database.sensor_event_queue.put(("sensor_removed", sensor_id))
+                    print(f"Sensor {sensor_id} destroyed successfully.")
+                except Exception as e:
+                    self.database.sensor_event_queue.put(("sensor_error", f"Could not remove sensor: {e}"))
+
+            if cmd == "change_sensor_transform":
+                sensor_id, transform = data
+                sensor = None
+                previous_transform = None
+                transform_sent = False
+                try:
+                    with self.database.lock:
+                        sensor = self.database.sensors_db.sensors.get(sensor_id)
+                        sensor_info = self.database.sensors_db.sensors_db.get(sensor_id)
+                    if sensor is None or sensor_info is None or not sensor.is_alive:
+                        raise RuntimeError("Sensor is no longer available.")
+
+                    parent_id = sensor_info.parent_id
+                    previous_transform = sensor_info.relative_transform
+                    sensor.set_transform(transform)
+                    transform_sent = True
+                    self.database.world.wait_for_tick(2.0)
+
+                    if not sensor.is_alive or sensor.parent is None or sensor.parent.id != parent_id:
+                        raise RuntimeError("Sensor attachment could not be confirmed.")
+
+                    with self.database.lock:
+                        current_sensor_info = self.database.sensors_db.sensors_db.get(sensor_id)
+                        if current_sensor_info is None:
+                            raise RuntimeError("Sensor is no longer available.")
+                        current_sensor_info.relative_transform = transform
+                    self.database.sensor_event_queue.put(("sensor_transform_changed", sensor_id))
+                    print(f"Sensor {sensor_id} transform changed successfully.")
+                except Exception as e:
+                    if transform_sent and sensor is not None and previous_transform is not None:
+                        try:
+                            sensor.set_transform(previous_transform)
+                            self.database.world.wait_for_tick(2.0)
+                        except Exception:
+                            pass
+                    self.database.sensor_event_queue.put((
+                        "sensor_error",
+                        f"Could not change sensor transform: {e}"
+                    ))
+
+            if cmd == "start_sensor_preview":
+                sensor_id = data["sensor_id"]
+                preview_buffer = data["preview_buffer"]
+                try:
+                    with self.database.lock:
+                        sensor = self.database.sensors_db.sensors.get(sensor_id)
+                    if sensor is None or not sensor.is_alive:
+                        raise RuntimeError("Sensor is no longer available.")
+                    if sensor_id in self.sensor_preview_ids or sensor.is_listening():
+                        raise RuntimeError("This sensor is already being used by another listener.")
+
+                    sensor.listen(data["image_callback"])
+                    self.sensor_preview_ids.add(sensor_id)
+                    preview_buffer.set_started()
+                except Exception as e:
+                    preview_buffer.set_error(f"Could not start sensor preview: {e}")
+
+            if cmd == "stop_sensor_preview":
+                self.stop_sensor_preview_actor(data)
+
+        self.cleanup_sensor_previews()
         self.cleanup_preview()
         self.data_ready = False
         self.connection_queue.put(("disconnected", None))
@@ -357,12 +492,48 @@ class CarlaController:
         self.database.ghost_physic = None
         self.database.ghost_spawned = False
 
+    def remove_sensors_for_parent(self, parent_id):
+        sensor_ids = [
+            sensor_id
+            for sensor_id, sensor_info in self.database.sensors_db.sensors_db.items()
+            if sensor_info.parent_id == parent_id
+        ]
+        for sensor_id in sensor_ids:
+            self.stop_sensor_preview_actor(sensor_id)
+            sensor = self.database.sensors_db.sensors.get(sensor_id)
+            if sensor is not None:
+                try:
+                    sensor.destroy()
+                except Exception as e:
+                    print(f"Error destroying sensor {sensor_id}: {e}")
+            self.database.sensors_db.remove_sensor(sensor_id)
+        if sensor_ids:
+            self.database.sensor_event_queue.put(("sensors_cleared", sensor_ids))
+
+    def stop_sensor_preview_actor(self, sensor_id):
+        if sensor_id not in self.sensor_preview_ids:
+            return
+        sensor = self.database.sensors_db.sensors.get(sensor_id)
+        if sensor is not None:
+            try:
+                if sensor.is_alive and sensor.is_listening():
+                    sensor.stop()
+            except Exception as e:
+                print(f"Error stopping sensor preview {sensor_id}: {e}")
+        self.sensor_preview_ids.discard(sensor_id)
+
+    def cleanup_sensor_previews(self):
+        for sensor_id in list(self.sensor_preview_ids):
+            self.stop_sensor_preview_actor(sensor_id)
+
 
     def spawn_actor(self, actor_data):
         self.command_queue.put(("spawn", actor_data))
 
     def change_world(self, new_world):
         self.world_changed_event.clear()
+        self.database.world_changed = False
+        self.database.world_change_error = None
         self.command_queue.put(("change_world", new_world))
 
     def change_weather(self, new_weather):
@@ -397,3 +568,22 @@ class CarlaController:
 
     def set_actor_transform(self, new_transform, actor_id):
         self.command_queue.put(("set_actor_transform", [new_transform, actor_id]))
+
+    def attach_sensor(self, sensor_data):
+        self.command_queue.put(("attach_sensor", sensor_data))
+
+    def remove_sensor(self, sensor_id):
+        self.command_queue.put(("remove_sensor", sensor_id))
+
+    def change_sensor_transform(self, sensor_id, transform):
+        self.command_queue.put(("change_sensor_transform", [sensor_id, transform]))
+
+    def start_sensor_preview(self, sensor_id, image_callback, preview_buffer):
+        self.command_queue.put(("start_sensor_preview", {
+            "sensor_id": sensor_id,
+            "image_callback": image_callback,
+            "preview_buffer": preview_buffer
+        }))
+
+    def stop_sensor_preview(self, sensor_id):
+        self.command_queue.put(("stop_sensor_preview", sensor_id))

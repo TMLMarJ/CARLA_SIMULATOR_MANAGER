@@ -11,6 +11,50 @@ class Actors:
         self.actors[actor.id] = actor
         self.actors_db[actor.id] = ActorInfo(actor, name)
 
+    def clear(self):
+        self.actors.clear()
+        self.actors_db.clear()
+
+
+class Sensors:
+    def __init__(self):
+        self.sensors: Dict[int, carla.Sensor] = {}
+        self.sensors_db: Dict[int, SensorInfo] = {}
+
+    def add_sensor(self, sensor: carla.Sensor, parent_id: int, name: str,
+                   blueprint_id: str, relative_transform: carla.Transform,
+                   attributes: dict):
+        self.sensors[sensor.id] = sensor
+        self.sensors_db[sensor.id] = SensorInfo(
+            sensor,
+            parent_id,
+            name,
+            blueprint_id,
+            relative_transform,
+            attributes
+        )
+
+    def remove_sensor(self, sensor_id: int):
+        self.sensors.pop(sensor_id, None)
+        self.sensors_db.pop(sensor_id, None)
+
+    def clear(self):
+        self.sensors.clear()
+        self.sensors_db.clear()
+
+
+class SensorInfo:
+    def __init__(self, sensor: carla.Sensor, parent_id: int, user_name: str,
+                 blueprint_id: str, relative_transform: carla.Transform,
+                 attributes: dict):
+        self.sensor = sensor
+        self.carla_id = sensor.id
+        self.parent_id = parent_id
+        self.user_name = user_name
+        self.blueprint_id = blueprint_id
+        self.relative_transform = relative_transform
+        self.attributes = attributes.copy()
+
 
 class ActorInfo:
     def __init__(self, actor: carla.Actor, user_name: str):

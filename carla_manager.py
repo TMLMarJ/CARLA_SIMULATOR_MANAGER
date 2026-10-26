@@ -18,6 +18,7 @@ from gui_contents.world_and_weather import CustomWorldAndWeatherFrame
 from gui_contents.vehicles import CustomVehicleFrame
 from gui_contents.pedestrians import CustomPedestrianFrame
 from gui_contents.static_objects import CustomStaticObjectFrame
+from gui_contents.sensors import CustomSensorFrame
 from gui_contents.StyleSettings import settings
 from gui_contents.main_gui_view import CustomMainViewFrame
 
@@ -194,6 +195,7 @@ class MainView(tk.Frame):
         self.vehicle_frame = None
         self.actor_frame = None
         self.static_object_frame = None
+        self.sensor_frame = None
         self.active_preview_frame = None
 
     @property
@@ -279,6 +281,9 @@ class MainView(tk.Frame):
         self.static_object_frame = CustomStaticObjectFrame(self.static_object_tab, self)
         self.static_object_frame.pack(expand=True, fill="both")
 
+        self.sensor_frame = CustomSensorFrame(self.sensors_tab, self)
+        self.sensor_frame.pack(expand=True, fill="both")
+
         self.actors_tab_control.select(self.vehicle_tab)
         self.tabControl.bind("<<NotebookTabChanged>>", self.on_tab_changed)
         self.actors_tab_control.bind("<<NotebookTabChanged>>", self.on_actor_tab_changed)
@@ -309,9 +314,9 @@ class MainView(tk.Frame):
             self.static_object_frame.destroy()
             self.static_object_frame = None
 
-
-
-
+        if self.sensor_frame is not None:
+            self.sensor_frame.destroy()
+            self.sensor_frame = None
 
 if __name__ == "__main__":
     app = Manager()

@@ -215,7 +215,7 @@ class CustomVehicleFrame(tk.Frame):
 
         button_control_frame = ttk.Frame(lower_frame, style="new.TFrame")
         button_control_frame.grid(row=1, column=0, sticky="ew", padx=20, pady=(0, 12))
-        for index in range(5):
+        for index in range(4):
             button_control_frame.grid_columnconfigure(index, weight=1)
 
         #==================================== Buttons ===================================
@@ -223,18 +223,14 @@ class CustomVehicleFrame(tk.Frame):
         spawn_button.grid(row=0, column=0, sticky="ew", pady=(0, 8), padx=(0, 10))
         physics_button = ttk.Button(button_frame, text="Edit", command=self.edit_vehicle, width=18)
         physics_button.grid(row=0, column=1, sticky="ew", pady=(0, 8), padx=(0, 10))
-        attach_sensor_button = ttk.Button(button_frame, text="Attach Sensor", command=self.attach_sensor, width=18)
-        attach_sensor_button.grid(row=0, column=2, pady=(0, 8), padx=(0, 10), sticky="ew")
         remove_button = ttk.Button(button_control_frame, text="Remove", command=self.remove_vehicle, width=18)
         remove_button.grid(row=0, column=0, sticky="ew", pady=(0, 8), padx=(0, 10))
         change_model_button = ttk.Button(button_control_frame, text="Change Model", command=self.change_model, width=18)
         change_model_button.grid(row=0, column=1, sticky="ew", pady=(0, 8), padx=(0, 10))
         update_location_button = ttk.Button(button_control_frame, text="Update Location", command=self.update_location, width=18)
         update_location_button.grid(row=0, column=2, sticky="ew", pady=(0, 8), padx=(0, 10))
-        attach_sensor_to_existing_button = ttk.Button(button_control_frame, text="Attach Sensor to Existing Vehicle", command=self.attach_sensor, width=30)
-        attach_sensor_to_existing_button.grid(row=0, column=3, sticky="ew", pady=(0, 8), padx=(0, 10))
         copy_button = ttk.Button(button_control_frame, text="Copy Vehicle", command=self.copy_vehicle, width=18)
-        copy_button.grid(row=0, column=4, sticky="ew", pady=(0, 8), padx=(0, 10))
+        copy_button.grid(row=0, column=3, sticky="ew", pady=(0, 8), padx=(0, 10))
 
     def update_location(self, event=None):
         if not self.vehicle_table.tree.selection():
@@ -453,9 +449,6 @@ class CustomVehicleFrame(tk.Frame):
         self.remove_vehicle()
         self.spawn_vehicle()
 
-    def attach_sensor(self):
-        pass
-
     def set_variables_from_table(self, event):
         selected_vehicle = self.vehicle_table.tree.selection()
         if selected_vehicle:
@@ -632,3 +625,8 @@ class VehicleTable(ttk.Frame):
                     "is_active": ("Active" if actor_info.is_alive else "Inactive")
                 }
                 self.add_vehicle_to_table(vehicle_info)
+
+    def refresh_table(self):
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        self.initialize_data()
