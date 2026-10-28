@@ -1,8 +1,9 @@
 import tkinter as tk
+import time
 from tkinter import ttk
 from PIL import Image, ImageTk
 
-from utilities.functions import parse_weather_to_dict, parse_weather_to_carla, wait_and_try
+from utilities.functions import parse_weather_to_dict, parse_weather_to_carla
 import messagebox
 
 class CustomWorldAndWeatherFrame(tk.Frame):
@@ -321,13 +322,33 @@ class CustomWorldAndWeatherFrame(tk.Frame):
         self._apply_world_after_spectator_close()
 
     def _apply_world_after_spectator_close(self):
-        try:
-            self.carla.change_world(self.selected_map.get())
-            is_finished = wait_and_try(
-                lambda: self.carla.world_changed_event.is_set(),
+        self.carla.change_world(self.selected_map.get())
+        self.world_change_started_at = time.monotonic()
+        self._wait_for_world_change()
+
+    def _wait_for_world_change(self):
+        self.world_change_check = None
+        manager = self.controller.manager
+        if (
+            not self.winfo_exists()
+            or not manager.connected
+            or manager.disconnecting
+            or manager.closing
+        ):
+            self._finish_world_change()
+            return
+
+        is_finished = self.carla.world_changed_event.is_set()
+        if not is_finished and time.monotonic() - self.world_change_started_at < 45.0:
+            self.world_change_check = self.after(
+                100,
+                self._wait_for_world_change,
             )
+            return
+
+        try:
             if is_finished:
-                self.controller.vehicle_frame.actor_table.refresh_table()
+                self.controller.vehicle_frame.vehicle_table.refresh_table()
                 self.controller.actor_frame.actor_table.refresh_table()
                 self.controller.static_object_frame.actor_table.refresh_table()
                 self.controller.sensor_frame.refresh_table()

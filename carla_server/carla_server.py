@@ -1,14 +1,21 @@
 import carla
 import threading
 import queue
+import time
 from utilities.functions import *
+from simulation_dashboard import SimulationDashboardMonitor
+from simulation_manager import SimulationManager
 
 class CarlaController:
+    TICK_TIMEOUT_SECONDS = 5.0
+
     def __init__(self, database, controller, host="127.0.0.1", port=2000):
         self.controller = controller
         self.command_queue = queue.Queue()
+        self.priority_command_queue = queue.Queue()
         self.connection_queue = queue.Queue()
         self.running = True
+        self.shutdown_event = threading.Event()
         self.database = database
         self.thread = None
         self.data_ready = False
@@ -18,6 +25,10 @@ class CarlaController:
         self.port = port
         self.shutdown_request = False
         self.sensor_preview_ids = set()
+        self.sensor_status_errors = {}
+        self.simulation_manager = SimulationManager()
+        self.dashboard_monitor = SimulationDashboardMonitor()
+        self._next_snapshot_check = 0.0
 
     def start(self):
         self.thread = threading.Thread(target=self.run, daemon=True)
@@ -25,14 +36,27 @@ class CarlaController:
 
     def run(self):
         try:
+            self._run_controller()
+        except Exception as error:
+            self.running = False
+            self.data_ready = False
+            self.simulation_manager.disconnect()
+            self.dashboard_monitor.disconnect(
+                self.database,
+                "Controller stopped after an unexpected error",
+                error,
+            )
+            self._publish_simulation_control_state(force=True)
+            self.connection_queue.put(("connection_error", str(error)))
+
+    def _run_controller(self):
+        try:
             self.client = carla.Client(self.host, self.port)
             self.client.set_timeout(5.0)
             world = self.client.get_world()
 
-
-            settings = world.get_settings()
-            settings.no_rendering_mode = False
-            world.apply_settings(settings)
+            simulation_settings = self.simulation_manager.get_current_settings(world)
+            self.simulation_manager.connect(simulation_settings)
 
             blueprint_library = world.get_blueprint_library()
             self.database.blueprint_lib = blueprint_library
@@ -48,24 +72,42 @@ class CarlaController:
             self.database.actual_weather_data = weather_data
             self.database.world_lib = self.client.get_available_maps()
             self.database.available_spawn_points = world.get_map().get_spawn_points()
+            self.database.actual_simulation_settings = simulation_settings
+            self.database.proposed_simulation_settings = simulation_settings.copy()
+            self.database.simulation_control_state = (
+                self.simulation_manager.snapshot()
+            )
 
             self.data_ready = True
+            self.dashboard_monitor.reset_world(
+                self.database,
+                world,
+                "Initial connection",
+            )
+            self._service_dashboard(world, force=True)
             self.connection_queue.put(("connected", None))
 
         except Exception as e:
             self.data_ready = False
             self.running = False
+            self.dashboard_monitor.disconnect(
+                self.database,
+                "Connection failed",
+                e,
+            )
             self.connection_queue.put(("connection_error", str(e)))
             return
 
         while self.running:
-            try:
-                cmd, data = self.command_queue.get(timeout=0.1)
-            except queue.Empty:
-                continue
+            queue_timeout = (
+                0.0 if self.simulation_manager.should_tick() else 0.1
+            )
+            cmd, data = self._get_next_command(queue_timeout)
 
             if cmd == "shutdown":
                 print("DEBUG: SHUTDOWN COMMAND RECEIVED")
+                self.simulation_manager.disconnect()
+                self._publish_simulation_control_state(force=True)
                 self.running = False
                 break
 
@@ -97,6 +139,13 @@ class CarlaController:
                         print(f"Actor {data['name']} spawned with ID {actor.id}")
 
             if cmd == "change_world":
+                self.simulation_manager.stop_local_ticks()
+                self._publish_simulation_control_state(force=True)
+                self.dashboard_monitor.invalidate(
+                    self.database,
+                    "World changing",
+                    connection_status="Connected",
+                )
                 self.world_changed_event.clear()
                 self.database.world_changed = False
                 self.database.world_change_error = None
@@ -120,7 +169,10 @@ class CarlaController:
                                     break
                             except RuntimeError:
                                 print(f"Attempt {i + 1}: server not ready")
-                            time.sleep(1)
+                            if self.shutdown_event.wait(1.0):
+                                raise RuntimeError(
+                                    "World change cancelled during shutdown."
+                                )
 
                     if (
                         new_world is None or
@@ -134,6 +186,7 @@ class CarlaController:
 
                     self.cleanup_sensor_previews()
                     self.cleanup_preview()
+                    self.sensor_status_errors.clear()
                     with self.database.lock:
                         self.database.actors_db.clear()
                         self.database.sensors_db.clear()
@@ -146,14 +199,35 @@ class CarlaController:
                     new_weather = new_world.get_weather()
                     new_weather_data = parse_weather_to_dict(new_weather)
                     new_spawn_points = new_world.get_map().get_spawn_points()
+                    new_simulation_settings = (
+                        self.simulation_manager.get_current_settings(new_world)
+                    )
+                    self.simulation_manager.settings_changed(
+                        new_simulation_settings,
+                        preserve_activity=False,
+                    )
 
                     with self.database.lock:
                         self.database.world_lib = new_world_library
                         self.database.actual_weather_data = new_weather_data
                         self.database.available_spawn_points = new_spawn_points
+                        self.database.actual_simulation_settings = new_simulation_settings
+                        self.database.proposed_simulation_settings = (
+                            new_simulation_settings.copy()
+                        )
                         self.database.world_changed = True
+                    self.dashboard_monitor.reset_world(
+                        self.database,
+                        new_world,
+                    )
+                    self.database.simulation_event_queue.put((
+                        "simulation_settings_loaded",
+                        new_simulation_settings,
+                    ))
+                    self._publish_simulation_control_state(force=True)
                 except Exception as e:
                     self.database.world_change_error = str(e)
+                    self.dashboard_monitor.record_error(e)
                     print(f"Error changing map: {e}")
                 finally:
                     self.client.set_timeout(5.0)
@@ -162,6 +236,107 @@ class CarlaController:
             if cmd == "change_weather":
                 world = self.client.get_world()
                 world.set_weather(data)
+
+            if cmd == "get_simulation_settings":
+                try:
+                    current_settings = (
+                        self.simulation_manager.get_current_settings(world)
+                    )
+                    with self.database.lock:
+                        self.database.actual_simulation_settings = current_settings
+                        self.database.proposed_simulation_settings = (
+                            current_settings.copy()
+                        )
+                    self.simulation_manager.settings_changed(
+                        current_settings,
+                        preserve_activity=True,
+                    )
+                    self.database.simulation_event_queue.put((
+                        "simulation_settings_loaded",
+                        current_settings,
+                    ))
+                    self._publish_simulation_control_state(force=True)
+                except Exception as e:
+                    self.database.simulation_event_queue.put((
+                        "simulation_settings_error",
+                        {"message": str(e), "settings": None},
+                    ))
+
+            if cmd == "apply_simulation_settings":
+                confirmed_settings = None
+                try:
+                    confirmed_settings = self.simulation_manager.apply_settings(
+                        world,
+                        data,
+                    )
+                    with self.database.lock:
+                        self.database.actual_simulation_settings = confirmed_settings
+                        self.database.proposed_simulation_settings = (
+                            confirmed_settings.copy()
+                        )
+                    self.simulation_manager.settings_changed(
+                        confirmed_settings,
+                        preserve_activity=True,
+                    )
+                    self.database.simulation_event_queue.put((
+                        "simulation_settings_applied",
+                        confirmed_settings,
+                    ))
+                    self._publish_simulation_control_state(force=True)
+                except Exception as e:
+                    try:
+                        confirmed_settings = (
+                            self.simulation_manager.get_current_settings(world)
+                        )
+                        with self.database.lock:
+                            self.database.actual_simulation_settings = (
+                                confirmed_settings
+                            )
+                            self.database.proposed_simulation_settings = (
+                                confirmed_settings.copy()
+                            )
+                        self.simulation_manager.settings_changed(
+                            confirmed_settings,
+                            preserve_activity=True,
+                        )
+                    except Exception:
+                        pass
+                    self.database.simulation_event_queue.put((
+                        "simulation_settings_error",
+                        {
+                            "message": str(e),
+                            "settings": confirmed_settings,
+                        },
+                    ))
+                    self._publish_simulation_control_state(force=True)
+
+            if cmd == "set_tick_controller":
+                self._handle_simulation_control_command(
+                    self.simulation_manager.set_tick_controller,
+                    data,
+                )
+
+            if cmd == "run_simulation":
+                self._handle_tick_start_command(
+                    world,
+                    self.simulation_manager.start_running,
+                )
+
+            if cmd == "pause_simulation":
+                self._handle_simulation_control_command(
+                    self.simulation_manager.pause,
+                )
+
+            if cmd == "step_simulation":
+                self._handle_tick_start_command(
+                    world,
+                    self.simulation_manager.step,
+                    data,
+                )
+
+            if cmd == "stop_simulation_control":
+                self.simulation_manager.stop_local_ticks()
+                self._publish_simulation_control_state(force=True)
 
             if cmd == "spawn_preview_actor":
                 # A preview can be requested more than once by GUI events. Always
@@ -369,9 +544,11 @@ class CarlaController:
                             data["transform"],
                             data["attributes"]
                         )
+                    self.sensor_status_errors.pop(sensor.id, None)
                     self.database.sensor_event_queue.put(("sensor_attached", sensor.id))
                     print(f"Sensor {data['name']} spawned with ID {sensor.id}")
                 except Exception as e:
+                    self.dashboard_monitor.record_error(e)
                     if sensor is not None:
                         try:
                             sensor.destroy()
@@ -389,9 +566,11 @@ class CarlaController:
                             raise RuntimeError("Sensor is no longer available.")
                         sensor.destroy()
                         self.database.sensors_db.remove_sensor(sensor_id)
+                    self.sensor_status_errors.pop(sensor_id, None)
                     self.database.sensor_event_queue.put(("sensor_removed", sensor_id))
                     print(f"Sensor {sensor_id} destroyed successfully.")
                 except Exception as e:
+                    self.dashboard_monitor.record_error(e)
                     self.database.sensor_event_queue.put(("sensor_error", f"Could not remove sensor: {e}"))
 
             if cmd == "change_sensor_transform":
@@ -423,6 +602,7 @@ class CarlaController:
                     self.database.sensor_event_queue.put(("sensor_transform_changed", sensor_id))
                     print(f"Sensor {sensor_id} transform changed successfully.")
                 except Exception as e:
+                    self.dashboard_monitor.record_error(e)
                     if transform_sent and sensor is not None and previous_transform is not None:
                         try:
                             sensor.set_transform(previous_transform)
@@ -447,16 +627,29 @@ class CarlaController:
 
                     sensor.listen(data["image_callback"])
                     self.sensor_preview_ids.add(sensor_id)
+                    self.sensor_status_errors.pop(sensor_id, None)
                     preview_buffer.set_started()
                 except Exception as e:
-                    preview_buffer.set_error(f"Could not start sensor preview: {e}")
+                    error_message = f"Could not start sensor preview: {e}"
+                    self.sensor_status_errors[sensor_id] = error_message
+                    self.dashboard_monitor.record_error(error_message)
+                    preview_buffer.set_error(error_message)
 
             if cmd == "stop_sensor_preview":
                 self.stop_sensor_preview_actor(data)
 
+            world_snapshot = None
+            if self.running and cmd != "stop_simulation_control":
+                world_snapshot = self._service_simulation(world)
+            if self.running:
+                self._service_dashboard(world, world_snapshot=world_snapshot)
+
         self.cleanup_sensor_previews()
         self.cleanup_preview()
+        self.simulation_manager.disconnect()
+        self._publish_simulation_control_state(force=True)
         self.data_ready = False
+        self.dashboard_monitor.disconnect(self.database)
         self.connection_queue.put(("disconnected", None))
 
 
@@ -465,8 +658,167 @@ class CarlaController:
 
 
 
+    def _handle_simulation_control_command(self, callback, *args):
+        try:
+            callback(*args)
+            self._publish_simulation_control_state(force=True)
+        except Exception as error:
+            self.dashboard_monitor.record_error(error)
+            self.database.simulation_event_queue.put((
+                "simulation_control_command_error",
+                str(error),
+            ))
+            self._publish_simulation_control_state(force=True)
+
+    def _handle_tick_start_command(self, world, callback, *args):
+        try:
+            current_settings = self.simulation_manager.get_current_settings(
+                world
+            )
+            with self.database.lock:
+                previous_settings = self.database.actual_simulation_settings
+                settings_changed = previous_settings != current_settings
+                self.database.actual_simulation_settings = current_settings
+                self.database.proposed_simulation_settings = (
+                    current_settings.copy()
+                )
+            self.simulation_manager.settings_changed(
+                current_settings,
+                preserve_activity=True,
+            )
+            if settings_changed:
+                self.database.simulation_event_queue.put((
+                    "simulation_settings_loaded",
+                    current_settings,
+                ))
+            if not current_settings["synchronous_mode"]:
+                raise RuntimeError(
+                    "CARLA is currently asynchronous. Apply Synchronous "
+                    "mode before starting GUI ticks."
+                )
+            callback(*args)
+            self._publish_simulation_control_state(force=True)
+        except Exception as error:
+            self.dashboard_monitor.record_error(error)
+            self.database.simulation_event_queue.put((
+                "simulation_control_command_error",
+                str(error),
+            ))
+            self._publish_simulation_control_state(force=True)
+
+    def _get_next_command(self, timeout):
+        try:
+            return self.priority_command_queue.get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            return self.command_queue.get(timeout=timeout)
+        except queue.Empty:
+            return None, None
+
+    def _service_simulation(self, world):
+        if self.simulation_manager.state == SimulationManager.ERROR:
+            return None
+        if self.simulation_manager.should_tick():
+            previous_state = self.simulation_manager.state
+            try:
+                self.before_simulation_tick(world)
+                frame = world.tick(self.TICK_TIMEOUT_SECONDS)
+                self.simulation_manager.record_tick(frame)
+                self.after_simulation_tick(world, frame)
+                force_publish = self.simulation_manager.state != previous_state
+                self._publish_simulation_control_state(force=force_publish)
+            except Exception as error:
+                self.simulation_manager.fail(error)
+                self.dashboard_monitor.record_error(error)
+                self._publish_simulation_control_state(force=True)
+            return None
+
+        now = time.monotonic()
+        if now < self._next_snapshot_check:
+            return None
+        self._next_snapshot_check = now + 0.1
+        try:
+            snapshot = world.get_snapshot()
+            frame = getattr(snapshot, "frame", None)
+            if frame != self.simulation_manager.last_frame:
+                self.simulation_manager.record_observed_frame(frame)
+                self._publish_simulation_control_state()
+            return snapshot
+        except Exception as error:
+            self.simulation_manager.fail(error)
+            self.dashboard_monitor.record_error(error)
+            self._publish_simulation_control_state(force=True)
+            return None
+
+    def _service_dashboard(self, world, world_snapshot=None, force=False):
+        internal_actor_ids = set()
+        streaming_sensor_ids = set(self.sensor_preview_ids)
+
+        for actor in (self.database.ghost_data, self.database.ghost_camera):
+            actor_id = self._actor_id(actor)
+            if actor_id is not None:
+                internal_actor_ids.add(actor_id)
+        ghost_camera_id = self._actor_id(self.database.ghost_camera)
+        if ghost_camera_id is not None:
+            streaming_sensor_ids.add(ghost_camera_id)
+
+        spectator_camera_id = getattr(
+            self.controller,
+            "spectator_camera_id",
+            None,
+        )
+        if spectator_camera_id is not None:
+            internal_actor_ids.add(spectator_camera_id)
+            streaming_sensor_ids.add(spectator_camera_id)
+
+        viewer_status = getattr(self.controller, "spectator_state", "Unknown")
+        self.dashboard_monitor.update(
+            world,
+            self.database,
+            self.simulation_manager,
+            self.command_queue.qsize() + self.priority_command_queue.qsize(),
+            viewer_status,
+            internal_actor_ids,
+            streaming_sensor_ids,
+            self.sensor_status_errors,
+            world_snapshot=world_snapshot,
+            force=force,
+        )
+
+    @staticmethod
+    def _actor_id(actor):
+        if actor is None:
+            return None
+        try:
+            return int(actor.id)
+        except Exception:
+            return None
+
+    def before_simulation_tick(self, world):
+        """Extension point for future operations immediately before a GUI tick."""
+        pass
+
+    def after_simulation_tick(self, world, frame):
+        """Extension point for future operations immediately after a GUI tick."""
+        pass
+
+    def _publish_simulation_control_state(self, force=False):
+        control_state = self.simulation_manager.snapshot()
+        with self.database.lock:
+            self.database.simulation_control_state = control_state
+
+        if not force:
+            return
+        self.database.simulation_event_queue.put((
+            "simulation_control_state",
+            control_state,
+        ))
+
     def shutdown(self):
         print("Shutting down CARLA...")
+        self.shutdown_event.set()
+        self.running = False
         if self.thread is None or not self.thread.is_alive():
             return
         self.command_queue.put(("shutdown", None))
@@ -507,6 +859,7 @@ class CarlaController:
                 except Exception as e:
                     print(f"Error destroying sensor {sensor_id}: {e}")
             self.database.sensors_db.remove_sensor(sensor_id)
+            self.sensor_status_errors.pop(sensor_id, None)
         if sensor_ids:
             self.database.sensor_event_queue.put(("sensors_cleared", sensor_ids))
 
@@ -538,6 +891,27 @@ class CarlaController:
 
     def change_weather(self, new_weather):
         self.command_queue.put(("change_weather", new_weather))
+
+    def get_simulation_settings(self):
+        self.command_queue.put(("get_simulation_settings", None))
+
+    def apply_simulation_settings(self, settings):
+        self.command_queue.put(("apply_simulation_settings", settings))
+
+    def set_tick_controller(self, controller):
+        self.command_queue.put(("set_tick_controller", controller))
+
+    def run_simulation(self):
+        self.command_queue.put(("run_simulation", None))
+
+    def pause_simulation(self):
+        self.priority_command_queue.put(("pause_simulation", None))
+
+    def step_simulation(self, count=1):
+        self.command_queue.put(("step_simulation", count))
+
+    def stop_simulation_control(self):
+        self.priority_command_queue.put(("stop_simulation_control", None))
 
     def spawn_preview_actor(self, blueprint_id, transform, image_callback):
         self.command_queue.put(("spawn_preview_actor", {

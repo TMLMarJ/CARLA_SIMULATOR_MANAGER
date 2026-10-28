@@ -1,5 +1,6 @@
 import queue
 import multiprocessing
+import copy
 
 import carla
 import tkinter as tk
@@ -55,11 +56,14 @@ class Manager(tk.Tk):
         self.world_changing = False
         self.spectator_preview = SpectatorPreviewManager()
         self.spectator_state = "Closed"
+        self.spectator_camera_id = None
         self.spectator_check_job = None
+        self.simulation_check_job = None
 
         self.main_view = None
         self.create_main_window()
         self.check_spectator_preview()
+        self.check_simulation_events()
 
     def create_main_window(self):
         self.main_view = MainView(self)
@@ -90,6 +94,11 @@ class Manager(tk.Tk):
             return
 
         self.connected = False
+        self.main_view.main_view.connection_frame.update_connection_state(
+            False,
+            busy=True,
+        )
+        self.main_view.main_view.dashboard_frame.show_context("Connecting")
 
         self.carla = carla_server.CarlaController(
             self.database,
@@ -116,6 +125,12 @@ class Manager(tk.Tk):
 
                         self.main_view.initialize_connected_views()
                         self.main_view.main_view.connection_frame.update_connection_state(True)
+                        self.main_view.main_view.dashboard_frame.clear_context()
+                        self.main_view.main_view.simulation_frame.set_connected(
+                            True,
+                            self.database.actual_simulation_settings,
+                            self.database.simulation_control_state,
+                        )
                         if self.spectator_preview.is_active():
                             self.update_spectator_state("Stopping")
                         else:
@@ -128,7 +143,7 @@ class Manager(tk.Tk):
                     if not self.closing:
                         messagebox.showerror("CARLA Connection Error",
                                              f"Could not connect to CARLA:\n{data}")
-                    self.finish_disconnection()
+                    self.finish_disconnection(error=data)
                     return
 
                 elif status == "disconnected":
@@ -140,7 +155,7 @@ class Manager(tk.Tk):
 
         self.after(100, self.check_connection)
 
-    def finish_disconnection(self):
+    def finish_disconnection(self, error=None):
         print("Disconnected from CARLA")
 
         self.connected = False
@@ -149,6 +164,7 @@ class Manager(tk.Tk):
         self.spectator_preview.request_stop()
 
         self.main_view.clear_connected_views()
+        self.main_view.main_view.simulation_frame.set_connected(False)
 
         self.carla = None
 
@@ -156,6 +172,10 @@ class Manager(tk.Tk):
         self.main_view.database = self.database
         self.main_view.actor_manager = actors.Actors()
         self.main_view.main_view.connection_frame.update_connection_state(False)
+        self.main_view.main_view.dashboard_frame.show_context(
+            "Error" if error else "Disconnected",
+            error,
+        )
 
         if self.closing:
             self.finish_application_close()
@@ -177,8 +197,134 @@ class Manager(tk.Tk):
         self.main_view.actors_tab_control.unbind("<<NotebookTabChanged>>")
         self.main_view.tabControl.select(self.main_view.main_tab)
         self.main_view.set_tabs_enabled(False)
+        self.main_view.main_view.simulation_frame.set_connected(False)
+        self.main_view.main_view.dashboard_frame.show_context("Disconnected")
         self.close_spectator_preview()
+        self.carla.stop_simulation_control()
         self.carla.shutdown()
+
+    def apply_simulation_settings(self, settings):
+        if (
+            not self.connected
+            or self.disconnecting
+            or self.closing
+            or self.world_changing
+            or self.carla is None
+        ):
+            return
+
+        with self.database.lock:
+            self.database.proposed_simulation_settings = settings.copy()
+        self.main_view.main_view.simulation_frame.set_pending()
+        self.carla.apply_simulation_settings(settings)
+
+    def set_tick_controller(self, controller):
+        if not self._simulation_control_available():
+            return
+        self.main_view.main_view.simulation_frame.set_control_pending(
+            "Changing tick controller..."
+        )
+        self.carla.set_tick_controller(controller)
+
+    def run_simulation(self):
+        if not self._simulation_control_available():
+            return
+        self.main_view.main_view.simulation_frame.set_control_pending(
+            "Starting GUI ticks..."
+        )
+        self.carla.run_simulation()
+
+    def pause_simulation(self):
+        if not self._simulation_control_available():
+            return
+        self.main_view.main_view.simulation_frame.set_control_pending(
+            "Stopping after the current tick..."
+        )
+        self.carla.pause_simulation()
+
+    def step_simulation(self, count=1):
+        if not self._simulation_control_available():
+            return
+        self.main_view.main_view.simulation_frame.set_control_pending(
+            f"Requesting {count} tick{'s' if count != 1 else ''}..."
+        )
+        self.carla.step_simulation(count)
+
+    def _simulation_control_available(self):
+        return (
+            self.connected
+            and not self.disconnecting
+            and not self.closing
+            and not self.world_changing
+            and self.carla is not None
+        )
+
+    def check_simulation_events(self):
+        self.simulation_check_job = None
+
+        try:
+            while True:
+                status, data = self.database.simulation_event_queue.get_nowait()
+
+                if status in (
+                    "simulation_settings_loaded",
+                    "simulation_settings_applied",
+                ):
+                    if self.connected and not self.disconnecting and not self.closing:
+                        label = (
+                            "Settings applied"
+                            if status == "simulation_settings_applied"
+                            else "Settings loaded"
+                        )
+                        self.main_view.main_view.simulation_frame.load_settings(
+                            data,
+                            label,
+                        )
+                elif status == "simulation_settings_error":
+                    if self.connected and not self.disconnecting and not self.closing:
+                        self.main_view.main_view.simulation_frame.show_error(
+                            data["message"],
+                            data["settings"],
+                        )
+                elif status == "simulation_control_state":
+                    if self.connected and not self.disconnecting and not self.closing:
+                        self.main_view.main_view.simulation_frame.update_control_state(
+                            data
+                        )
+                elif status == "simulation_control_command_error":
+                    if self.connected and not self.disconnecting and not self.closing:
+                        self.main_view.main_view.simulation_frame.show_control_error(
+                            data
+                        )
+        except queue.Empty:
+            pass
+
+        self._refresh_dashboard()
+
+        if self.winfo_exists():
+            self.simulation_check_job = self.after(
+                100,
+                self.check_simulation_events,
+            )
+
+    def _refresh_dashboard(self):
+        if self.main_view is None:
+            return
+        with self.database.lock:
+            dashboard_data = (
+                copy.deepcopy(self.database.simulation_snapshot),
+                copy.deepcopy(self.database.actor_statistics),
+                copy.deepcopy(self.database.sensor_statistics),
+                copy.deepcopy(self.database.application_status),
+            )
+            control_state = copy.deepcopy(
+                self.database.simulation_control_state
+            )
+        self.main_view.main_view.dashboard_frame.refresh(*dashboard_data)
+        if self.connected and not self.disconnecting and not self.closing:
+            self.main_view.main_view.simulation_frame.update_control_observation(
+                control_state
+            )
 
     def open_spectator_preview(self):
         if (
@@ -225,10 +371,14 @@ class Manager(tk.Tk):
 
         for status, data in self.spectator_preview.poll_events():
             if status == "starting":
+                self.spectator_camera_id = None
                 self.update_spectator_state("Starting")
             elif status == "running":
+                if isinstance(data, dict):
+                    self.spectator_camera_id = data.get("sensor_id")
                 self.update_spectator_state("Running")
             elif status == "error":
+                self.spectator_camera_id = None
                 self.update_spectator_state("Error")
                 if (
                     not self.closing and
@@ -240,6 +390,7 @@ class Manager(tk.Tk):
                         f"Spectator View stopped because of an error:\n{data}"
                     )
             elif status == "closed":
+                self.spectator_camera_id = None
                 reason = data.get("reason") if isinstance(data, dict) else data
                 exit_code = data.get("exit_code") if isinstance(data, dict) else None
                 if reason == "process_exited" and exit_code not in (None, 0):
@@ -289,6 +440,9 @@ class Manager(tk.Tk):
         if not self.connected or self.disconnecting or self.closing:
             return False
         self.world_changing = True
+        self.carla.stop_simulation_control()
+        self.main_view.main_view.simulation_frame.set_external_busy(True)
+        self.main_view.main_view.dashboard_frame.show_context("Loading World")
         if self.spectator_preview.request_stop():
             self.update_spectator_state("Stopping")
         else:
@@ -297,6 +451,8 @@ class Manager(tk.Tk):
 
     def finish_world_change(self):
         self.world_changing = False
+        self.main_view.main_view.simulation_frame.set_external_busy(False)
+        self.main_view.main_view.dashboard_frame.clear_context()
         if self.connected and not self.spectator_preview.is_active():
             self.update_spectator_state("Closed")
         else:
@@ -316,6 +472,9 @@ class Manager(tk.Tk):
         if self.spectator_check_job is not None:
             self.after_cancel(self.spectator_check_job)
             self.spectator_check_job = None
+        if self.simulation_check_job is not None:
+            self.after_cancel(self.simulation_check_job)
+            self.simulation_check_job = None
         self.destroy()
 
 

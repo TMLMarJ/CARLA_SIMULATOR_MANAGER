@@ -70,6 +70,38 @@ settings={
         }
     },
 
+    "Status.Success.TLabel": {
+        "configure": {
+            "background": "#F7E7D3",
+            "foreground": "#3F7D3A",
+            "font": ("Segoe UI", 9, "bold")
+        }
+    },
+
+    "Status.Warning.TLabel": {
+        "configure": {
+            "background": "#F7E7D3",
+            "foreground": "#A85D24",
+            "font": ("Segoe UI", 9, "bold")
+        }
+    },
+
+    "Status.Error.TLabel": {
+        "configure": {
+            "background": "#F7E7D3",
+            "foreground": "#A33A32",
+            "font": ("Segoe UI", 9, "bold")
+        }
+    },
+
+    "Status.Muted.TLabel": {
+        "configure": {
+            "background": "#F7E7D3",
+            "foreground": "#7D6A60",
+            "font": ("Segoe UI", 9, "bold")
+        }
+    },
+
     # =========================================================
     # BUTTON
     # =========================================================
