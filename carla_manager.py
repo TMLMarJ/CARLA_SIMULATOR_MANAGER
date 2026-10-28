@@ -1,4 +1,5 @@
 import queue
+import multiprocessing
 
 import carla
 import tkinter as tk
@@ -21,6 +22,7 @@ from gui_contents.static_objects import CustomStaticObjectFrame
 from gui_contents.sensors import CustomSensorFrame
 from gui_contents.StyleSettings import settings
 from gui_contents.main_gui_view import CustomMainViewFrame
+from spectator_preview import SpectatorPreviewManager
 
 from utilities.functions import parse_weather_to_dict, parse_weather_to_carla, wait_and_try, return_data_from_transform
 
@@ -50,11 +52,14 @@ class Manager(tk.Tk):
         self.connected = False
         self.closing = False
         self.disconnecting = False
+        self.world_changing = False
+        self.spectator_preview = SpectatorPreviewManager()
+        self.spectator_state = "Closed"
+        self.spectator_check_job = None
 
         self.main_view = None
         self.create_main_window()
-
-
+        self.check_spectator_preview()
 
     def create_main_window(self):
         self.main_view = MainView(self)
@@ -63,15 +68,25 @@ class Manager(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
     def on_close(self):
-        print("Closing app...")
-        if self.carla is None:
-            self.destroy()
+        if self.closing:
             return
+        print("Closing app...")
         self.closing = True
+        self.close_spectator_preview()
+        if self.carla is None:
+            self.finish_application_close()
+            return
         self.disconnect_from_carla()
 
     def connect_to_carla(self, host="127.0.0.1", port=2000):
         if self.carla is not None:
+            return
+        self.spectator_preview.poll_events()
+        if self.spectator_preview.is_active():
+            messagebox.showinfo(
+                "Spectator View",
+                "Wait for Spectator View to close before connecting again."
+            )
             return
 
         self.connected = False
@@ -101,6 +116,10 @@ class Manager(tk.Tk):
 
                         self.main_view.initialize_connected_views()
                         self.main_view.main_view.connection_frame.update_connection_state(True)
+                        if self.spectator_preview.is_active():
+                            self.update_spectator_state("Stopping")
+                        else:
+                            self.update_spectator_state("Closed")
 
                 elif status == "connection_error":
                     self.connected = False
@@ -126,6 +145,8 @@ class Manager(tk.Tk):
 
         self.connected = False
         self.disconnecting = False
+        self.world_changing = False
+        self.spectator_preview.request_stop()
 
         self.main_view.clear_connected_views()
 
@@ -137,9 +158,11 @@ class Manager(tk.Tk):
         self.main_view.main_view.connection_frame.update_connection_state(False)
 
         if self.closing:
-            self.destroy()
-
-
+            self.finish_application_close()
+        elif self.spectator_preview.is_active():
+            self.update_spectator_state("Stopping")
+        else:
+            self.update_spectator_state("Closed")
 
     def disconnect_from_carla(self):
         print("DEBUG: disconnect_from_carla CALLED")
@@ -149,11 +172,151 @@ class Manager(tk.Tk):
         print("Disconnecting from CARLA")
         self.disconnecting = True
         self.connected = False
+        self.world_changing = False
         self.main_view.tabControl.unbind("<<NotebookTabChanged>>")
         self.main_view.actors_tab_control.unbind("<<NotebookTabChanged>>")
         self.main_view.tabControl.select(self.main_view.main_tab)
         self.main_view.set_tabs_enabled(False)
+        self.close_spectator_preview()
         self.carla.shutdown()
+
+    def open_spectator_preview(self):
+        if (
+            not self.connected or
+            self.disconnecting or
+            self.closing or
+            self.world_changing or
+            self.carla is None
+        ):
+            return
+
+        try:
+            preview_config = (
+                self.main_view.main_view.spectator_frame.get_preview_config()
+            )
+            started = self.spectator_preview.start(
+                self.carla.host,
+                self.carla.port,
+                preview_config
+            )
+        except ValueError as error:
+            messagebox.showerror(
+                "Invalid Spectator View Settings",
+                str(error)
+            )
+            return
+        except Exception as error:
+            self.update_spectator_state("Error")
+            messagebox.showerror(
+                "Spectator View Error",
+                f"Could not start Spectator View:\n{error}"
+            )
+            return
+
+        if started:
+            self.update_spectator_state("Starting")
+
+    def close_spectator_preview(self):
+        if self.spectator_preview.request_stop():
+            self.update_spectator_state("Stopping")
+
+    def check_spectator_preview(self):
+        self.spectator_check_job = None
+
+        for status, data in self.spectator_preview.poll_events():
+            if status == "starting":
+                self.update_spectator_state("Starting")
+            elif status == "running":
+                self.update_spectator_state("Running")
+            elif status == "error":
+                self.update_spectator_state("Error")
+                if (
+                    not self.closing and
+                    not self.disconnecting and
+                    not self.world_changing
+                ):
+                    messagebox.showerror(
+                        "Spectator View Error",
+                        f"Spectator View stopped because of an error:\n{data}"
+                    )
+            elif status == "closed":
+                reason = data.get("reason") if isinstance(data, dict) else data
+                exit_code = data.get("exit_code") if isinstance(data, dict) else None
+                if reason == "process_exited" and exit_code not in (None, 0):
+                    self.update_spectator_state("Error")
+                    if (
+                        not self.closing and
+                        not self.disconnecting and
+                        not self.world_changing
+                    ):
+                        messagebox.showerror(
+                            "Spectator View Error",
+                            f"Spectator View process exited with code {exit_code}."
+                        )
+                elif reason != "error" or self.spectator_state != "Error":
+                    self.update_spectator_state("Closed")
+
+        if self.spectator_preview.stop_timed_out(10.0):
+            stopped = self.spectator_preview.force_stop()
+            if stopped:
+                if self.closing or self.disconnecting or self.world_changing:
+                    self.update_spectator_state("Closed")
+                else:
+                    self.update_spectator_state("Error")
+                    messagebox.showerror(
+                        "Spectator View Error",
+                        "Spectator View did not close in time and was terminated."
+                    )
+
+        if self.winfo_exists():
+            self.spectator_check_job = self.after(
+                100,
+                self.check_spectator_preview
+            )
+
+    def update_spectator_state(self, state):
+        self.spectator_state = state
+        if self.main_view is not None:
+            self.main_view.main_view.spectator_frame.update_state(
+                state,
+                self.connected and
+                not self.disconnecting and
+                not self.world_changing and
+                not self.closing
+            )
+
+    def begin_world_change(self):
+        if not self.connected or self.disconnecting or self.closing:
+            return False
+        self.world_changing = True
+        if self.spectator_preview.request_stop():
+            self.update_spectator_state("Stopping")
+        else:
+            self.update_spectator_state(self.spectator_state)
+        return True
+
+    def finish_world_change(self):
+        self.world_changing = False
+        if self.connected and not self.spectator_preview.is_active():
+            self.update_spectator_state("Closed")
+        else:
+            self.update_spectator_state(self.spectator_state)
+
+    def finish_application_close(self):
+        self.spectator_preview.poll_events()
+        if self.spectator_preview.is_active():
+            if self.spectator_preview.stop_timed_out(10.0):
+                if not self.spectator_preview.force_stop():
+                    self.after(100, self.finish_application_close)
+                    return
+            else:
+                self.after(100, self.finish_application_close)
+                return
+
+        if self.spectator_check_job is not None:
+            self.after_cancel(self.spectator_check_job)
+            self.spectator_check_job = None
+        self.destroy()
 
 
 class MainView(tk.Frame):
@@ -319,5 +482,6 @@ class MainView(tk.Frame):
             self.sensor_frame = None
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     app = Manager()
     app.mainloop()

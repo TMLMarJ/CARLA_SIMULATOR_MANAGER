@@ -36,6 +36,8 @@ class CustomWorldAndWeatherFrame(tk.Frame):
         self.map_display = None
         self.display = None
         self.disp_label = None
+        self.world_change_pending = False
+        self.world_change_check = None
         self._world_control_frame_setup()
 
         # Weather Config
@@ -65,9 +67,13 @@ class CustomWorldAndWeatherFrame(tk.Frame):
         select_map_combobox.grid(row=2, column=0, sticky="ew")
         select_map_combobox.bind("<<ComboboxSelected>>", self.update_image)
 
-        apply_button = ttk.Button(self.world_control_frame_selection, text="Apply", command=self._apply_world,
-                                  width=10)
-        apply_button.grid(row=3, column=0, sticky="w", pady=(12, 0))
+        self.apply_world_button = ttk.Button(
+            self.world_control_frame_selection,
+            text="Apply",
+            command=self._apply_world,
+            width=10
+        )
+        self.apply_world_button.grid(row=3, column=0, sticky="w", pady=(12, 0))
 
         self.map_display = self._load_map_image()
         self.display = ImageTk.PhotoImage(self.map_display)
@@ -281,28 +287,71 @@ class CustomWorldAndWeatherFrame(tk.Frame):
             return map_image.resize((450, 270), Image.Resampling.LANCZOS)
 
     def _apply_world(self):
-        self.carla.change_world(self.selected_map.get())
-        is_finished = wait_and_try(
-            lambda: self.carla.world_changed_event.is_set(),
-        )
-        if is_finished:
-            self.controller.vehicle_frame.actor_table.refresh_table()
-            self.controller.actor_frame.actor_table.refresh_table()
-            self.controller.static_object_frame.actor_table.refresh_table()
-            self.controller.sensor_frame.refresh_table()
+        if self.world_change_pending:
+            return
 
-        if is_finished and self.database.world_changed:
-            self.reset_weather()
-            self.controller.vehicle_frame.update_spawn_point()
-            self.controller.actor_frame.update_spawn_point()
-            self.controller.static_object_frame.update_spawn_point()
+        manager = self.controller.manager
+        if not manager.begin_world_change():
+            return
 
-            active_preview_frame = self.controller.active_preview_frame
-            if active_preview_frame is not None:
-                self.controller._set_active_preview(None)
-                self.controller._set_active_preview(active_preview_frame)
-        else:
-            error = self.database.world_change_error
-            if error is None:
-                error = "Timeout changing map, variables could not be changed."
-            messagebox.showerror("Error changing map", error)
+        self.world_change_pending = True
+        self.apply_world_button.configure(state="disabled")
+        self._wait_for_spectator_close()
+
+    def _wait_for_spectator_close(self):
+        self.world_change_check = None
+        manager = self.controller.manager
+
+        if (
+            not self.winfo_exists() or
+            not manager.connected or
+            manager.disconnecting or
+            manager.closing
+        ):
+            self._finish_world_change()
+            return
+
+        if manager.spectator_preview.is_active():
+            self.world_change_check = self.after(
+                100,
+                self._wait_for_spectator_close
+            )
+            return
+
+        self._apply_world_after_spectator_close()
+
+    def _apply_world_after_spectator_close(self):
+        try:
+            self.carla.change_world(self.selected_map.get())
+            is_finished = wait_and_try(
+                lambda: self.carla.world_changed_event.is_set(),
+            )
+            if is_finished:
+                self.controller.vehicle_frame.actor_table.refresh_table()
+                self.controller.actor_frame.actor_table.refresh_table()
+                self.controller.static_object_frame.actor_table.refresh_table()
+                self.controller.sensor_frame.refresh_table()
+
+            if is_finished and self.database.world_changed:
+                self.reset_weather()
+                self.controller.vehicle_frame.update_spawn_point()
+                self.controller.actor_frame.update_spawn_point()
+                self.controller.static_object_frame.update_spawn_point()
+
+                active_preview_frame = self.controller.active_preview_frame
+                if active_preview_frame is not None:
+                    self.controller._set_active_preview(None)
+                    self.controller._set_active_preview(active_preview_frame)
+            else:
+                error = self.database.world_change_error
+                if error is None:
+                    error = "Timeout changing map, variables could not be changed."
+                messagebox.showerror("Error changing map", error)
+        finally:
+            self._finish_world_change()
+
+    def _finish_world_change(self):
+        self.world_change_pending = False
+        if self.winfo_exists() and self.controller.manager.connected:
+            self.apply_world_button.configure(state="normal")
+        self.controller.manager.finish_world_change()
