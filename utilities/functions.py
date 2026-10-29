@@ -4,15 +4,60 @@ import time
 import carla
 
 
+def get_pedestrian_blueprint_ids(blueprint_lib):
+    """Return available pedestrian blueprint IDs in stable ID order."""
+    if blueprint_lib is None:
+        return []
+    return sorted(
+        (
+            str(blueprint.id)
+            for blueprint in blueprint_lib.filter("walker.pedestrian.*")
+        ),
+        key=str,
+    )
+
+
+def pedestrian_blueprint_options(blueprint_ids):
+    """Build the GUI label-to-ID mapping without using list indexes."""
+    return {
+        str(blueprint_id): str(blueprint_id)
+        for blueprint_id in sorted(blueprint_ids, key=str)
+    }
+
+
+def resolve_blueprint_selection(options, selected_value):
+    """Resolve one GUI value to its exact full blueprint ID."""
+    try:
+        return options[str(selected_value)]
+    except (KeyError, TypeError):
+        raise ValueError(
+            f"Selected blueprint is unavailable: {selected_value!r}."
+        ) from None
+
+
+def select_available_blueprint_id(blueprint_ids, selected_blueprint_id=None):
+    """Preserve an ID across refreshes, otherwise select the first ID."""
+    available = sorted((str(value) for value in blueprint_ids), key=str)
+    selected = (
+        str(selected_blueprint_id)
+        if selected_blueprint_id is not None
+        else None
+    )
+    if selected in available:
+        return selected
+    return available[0] if available else ""
+
+
 def filter_carla_id_by_type(actor: str, type_base: str, blueprint_lib: carla.BlueprintLibrary):
+    if actor == "walker":
+        return pedestrian_blueprint_options(
+            get_pedestrian_blueprint_ids(blueprint_lib)
+        )
+
     filtered = blueprint_lib.filter(f'{actor}.*')
     selected = {}
     for bp in filtered:
-        if actor == "walker":
-            bp_id = bp.id
-            _, pedestrian, number = str(bp_id).split('.')
-            selected[f"{pedestrian.capitalize()}:{number}"] = bp_id
-        elif actor == "static":
+        if actor == "static":
             bp_id = bp.id
             blueprint_parts = str(bp_id).split('.')
             if len(blueprint_parts) < 3 or blueprint_parts[1] != "prop":

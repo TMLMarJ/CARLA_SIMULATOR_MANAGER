@@ -21,9 +21,13 @@ class FakeWalker:
         self.type_id = "walker.pedestrian.test"
         self.is_alive = True
         self.location = FakeLocation(0.0)
+        self.controls = []
 
     def get_location(self):
         return self.location
+
+    def apply_control(self, control):
+        self.controls.append(control)
 
 
 class FakeWalkerController:
@@ -110,7 +114,7 @@ class WalkerControlTests(unittest.TestCase):
             "speed": speed,
         })
 
-    def test_start_creates_one_controller_and_assigns_random_target(self):
+    def test_start_uses_direct_control_and_assigns_random_target(self):
         target = FakeLocation(8.0, 2.0, 0.0)
         world = FakeWorld([target])
 
@@ -119,13 +123,14 @@ class WalkerControlTests(unittest.TestCase):
         state = self.controller.database.walker_ai_states[21]
         self.assertEqual(WALKER_AI_RUNNING, state["mode"])
         self.assertTrue(state["active"])
-        self.assertEqual(81, state["controller_id"])
-        self.assertEqual(1, world.spawn_count)
-        self.assertEqual(1, world.controller.start_count)
-        self.assertEqual([1.7], world.controller.speeds)
-        self.assertEqual([target], world.controller.targets)
+        self.assertIsNone(state["controller_id"])
+        self.assertEqual(0, world.spawn_count)
+        self.assertEqual({}, self.controller.walker_ai_controllers)
+        self.assertEqual(1, len(self.walker.controls))
+        self.assertAlmostEqual(1.7, self.walker.controls[-1].speed)
+        self.assertEqual(8.0, state["target"]["x"])
 
-    def test_stop_and_resume_reuses_existing_controller(self):
+    def test_stop_and_resume_restarts_direct_control(self):
         world = FakeWorld([FakeLocation(5.0), FakeLocation(9.0)])
         self.set_enabled(world, True)
 
@@ -133,26 +138,27 @@ class WalkerControlTests(unittest.TestCase):
         stopped = self.controller.database.walker_ai_states[21]
         self.assertEqual(WALKER_AI_STOPPED, stopped["mode"])
         self.assertFalse(stopped["active"])
-        self.assertTrue(world.controller.is_alive)
+        self.assertEqual(0.0, self.walker.controls[-1].speed)
 
         self.set_enabled(world, True)
-        self.assertEqual(1, world.spawn_count)
-        self.assertEqual(2, world.controller.start_count)
-        self.assertEqual(1, world.controller.stop_count)
+        self.assertEqual(0, world.spawn_count)
+        self.assertEqual(0, world.controller.start_count)
+        self.assertTrue(
+            self.controller.walker_ai_runtime[21]["fallback_active"]
+        )
+        self.assertAlmostEqual(1.7, self.walker.controls[-1].speed)
 
-    def test_recreated_dead_controller_is_started_for_active_state(self):
+    def test_repeated_start_refreshes_direct_target_without_controller(self):
         first_world = FakeWorld([FakeLocation(5.0)])
         self.set_enabled(first_world, True)
-        first_world.controller.is_alive = False
-
         second_world = FakeWorld([FakeLocation(9.0)])
         self.set_enabled(second_world, True)
 
-        self.assertEqual(1, second_world.spawn_count)
-        self.assertEqual(1, second_world.controller.start_count)
-        self.assertIs(
-            second_world.controller,
-            self.controller.walker_ai_controllers[21],
+        self.assertEqual(0, second_world.spawn_count)
+        self.assertEqual({}, self.controller.walker_ai_controllers)
+        self.assertEqual(
+            9.0,
+            self.controller.database.walker_ai_states[21]["target"]["x"],
         )
 
     def test_stop_remains_available_when_speed_field_is_invalid(self):
@@ -169,7 +175,8 @@ class WalkerControlTests(unittest.TestCase):
         state = self.controller.database.walker_ai_states[21]
         self.assertEqual(WALKER_AI_STOPPED, state["mode"])
         self.assertFalse(state["active"])
-        self.assertEqual(1, world.controller.stop_count)
+        self.assertEqual(0, world.controller.stop_count)
+        self.assertEqual(0.0, self.walker.controls[-1].speed)
 
     def test_speed_can_be_saved_while_stopped_without_creating_controller(self):
         world = FakeWorld([])
@@ -185,7 +192,7 @@ class WalkerControlTests(unittest.TestCase):
         self.assertEqual(0, world.spawn_count)
         self.assertEqual({}, self.controller.walker_ai_controllers)
 
-    def test_speed_change_is_applied_to_active_controller(self):
+    def test_speed_change_is_applied_to_active_direct_control(self):
         world = FakeWorld([FakeLocation(5.0)])
         self.set_enabled(world, True)
 
@@ -195,13 +202,14 @@ class WalkerControlTests(unittest.TestCase):
             "speed": 2.3,
         })
 
-        self.assertEqual([1.7, 2.3], world.controller.speeds)
+        self.assertEqual([], world.controller.speeds)
+        self.assertAlmostEqual(2.3, self.walker.controls[-1].speed)
         self.assertEqual(
             2.3,
             self.controller.database.walker_ai_states[21]["speed"],
         )
 
-    def test_reaching_destination_assigns_another_target(self):
+    def test_finishing_direct_leg_assigns_another_target(self):
         first = FakeLocation(5.0)
         second = FakeLocation(12.0)
         world = FakeWorld([first, second])
@@ -216,11 +224,11 @@ class WalkerControlTests(unittest.TestCase):
             SimpleNamespace(frame=2),
         )
 
-        self.assertEqual([first, second], world.controller.targets)
+        self.assertEqual([], world.controller.targets)
         state_target = self.controller.database.walker_ai_states[21]["target"]
         self.assertEqual(12.0, state_target["x"])
 
-    def test_no_navigation_point_keeps_ai_active_and_retries_later(self):
+    def test_no_navigation_point_uses_actor_heading(self):
         world = FakeWorld([])
 
         self.set_enabled(world, True)
@@ -228,7 +236,8 @@ class WalkerControlTests(unittest.TestCase):
         state = self.controller.database.walker_ai_states[21]
         self.assertTrue(state["active"])
         self.assertIsNone(state["target"])
-        self.assertIn("retrying", state["status"])
+        self.assertIn("actor heading", state["status"])
+        self.assertEqual(1, len(self.walker.controls))
 
     def test_unchanged_world_frame_does_not_trigger_stall_reassignment(self):
         first = FakeLocation(5.0)
@@ -245,9 +254,9 @@ class WalkerControlTests(unittest.TestCase):
             SimpleNamespace(frame=1),
         )
 
-        self.assertEqual([first], world.controller.targets)
+        self.assertEqual(1, len(self.walker.controls))
 
-    def test_missing_progress_on_advancing_frames_selects_new_target(self):
+    def test_advancing_frame_services_direct_control(self):
         first = FakeLocation(5.0)
         second = FakeLocation(12.0)
         world = FakeWorld([first, second])
@@ -255,17 +264,56 @@ class WalkerControlTests(unittest.TestCase):
         runtime = self.controller.walker_ai_runtime[21]
         runtime["next_check"] = 0.0
         runtime["last_frame"] = 1
-        runtime["last_progress_at"] = 0.0
 
         self.controller._service_walker_ai(
             world,
             SimpleNamespace(frame=2),
         )
 
-        self.assertEqual([first, second], world.controller.targets)
+        self.assertEqual([], world.controller.targets)
+        self.assertEqual(0, world.controller.stop_count)
+        self.assertEqual(0, world.controller.destroy_count)
+        self.assertNotIn(21, self.controller.walker_ai_controllers)
+        self.assertTrue(
+            self.controller.walker_ai_runtime[21]["fallback_active"]
+        )
+        self.assertEqual(2, len(self.walker.controls))
         self.assertIn(
-            "no progress",
+            "direct control",
             self.controller.database.walker_ai_states[21]["status"],
+        )
+
+    def test_fallback_speed_change_applies_new_walker_control(self):
+        world = FakeWorld([FakeLocation(5.0)])
+        self.set_enabled(world, True)
+        runtime = self.controller.walker_ai_runtime[21]
+        runtime["next_check"] = 0.0
+        runtime["last_frame"] = 1
+        runtime["last_progress_at"] = 0.0
+        self.controller._service_walker_ai(world, SimpleNamespace(frame=2))
+
+        self.controller._set_walker_ai_speed({
+            "session_id": "session",
+            "actor_id": 21,
+            "speed": 2.3,
+        })
+
+        self.assertAlmostEqual(2.3, self.walker.controls[-1].speed)
+
+    def test_stop_clears_fallback_walker_control(self):
+        world = FakeWorld([FakeLocation(5.0)])
+        self.set_enabled(world, True)
+        runtime = self.controller.walker_ai_runtime[21]
+        runtime["next_check"] = 0.0
+        runtime["last_frame"] = 1
+        runtime["last_progress_at"] = 0.0
+        self.controller._service_walker_ai(world, SimpleNamespace(frame=2))
+
+        self.set_enabled(world, False)
+
+        self.assertEqual(0.0, self.walker.controls[-1].speed)
+        self.assertFalse(
+            self.controller.walker_ai_runtime[21]["fallback_active"]
         )
 
     def test_closing_preview_does_not_stop_walker_ai(self):
@@ -279,14 +327,15 @@ class WalkerControlTests(unittest.TestCase):
         self.assertEqual(0, world.controller.stop_count)
         self.assertTrue(world.controller.is_alive)
 
-    def test_actor_cleanup_stops_and_destroys_controller(self):
+    def test_actor_cleanup_stops_direct_control_without_controller(self):
         world = FakeWorld([FakeLocation(6.0)])
         self.set_enabled(world, True)
 
         self.controller._destroy_walker_ai(21, remove_state=True)
 
-        self.assertEqual(1, world.controller.stop_count)
-        self.assertEqual(1, world.controller.destroy_count)
+        self.assertEqual(0, world.controller.stop_count)
+        self.assertEqual(0, world.controller.destroy_count)
+        self.assertEqual(0.0, self.walker.controls[-1].speed)
         self.assertNotIn(21, self.controller.walker_ai_controllers)
         self.assertNotIn(21, self.controller.database.walker_ai_states)
 

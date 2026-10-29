@@ -26,10 +26,8 @@ class CarlaController:
     MANUAL_CONTROL_HZ = 20.0
     MANUAL_INPUT_TIMEOUT_SECONDS = 0.5
     WALKER_AI_CHECK_INTERVAL_SECONDS = 0.5
-    WALKER_AI_TARGET_RETRY_SECONDS = 2.0
-    WALKER_AI_REACHED_DISTANCE = 1.0
-    WALKER_AI_PROGRESS_DISTANCE = 0.25
-    WALKER_AI_STALL_SECONDS = 10.0
+    WALKER_AI_FALLBACK_STALL_SECONDS = 2.0
+    WALKER_AI_FALLBACK_LEG_DISTANCE = 4.0
 
     def __init__(self, database, controller, host="127.0.0.1", port=2000):
         self.controller = controller
@@ -68,6 +66,77 @@ class CarlaController:
         self.thread = threading.Thread(target=self.run, daemon=True)
         self.thread.start()
 
+    @staticmethod
+    def _find_blueprint_checked(blueprint_library, blueprint_id):
+        requested_id = str(blueprint_id)
+        try:
+            blueprint = blueprint_library.find(requested_id)
+        except Exception as error:
+            raise RuntimeError(
+                f"Blueprint '{requested_id}' is unavailable: {error}"
+            ) from error
+
+        resolved_id = str(getattr(blueprint, "id", ""))
+        if resolved_id != requested_id:
+            raise RuntimeError(
+                "Blueprint lookup mismatch: requested "
+                f"'{requested_id}', resolved '{resolved_id}'."
+            )
+        return blueprint
+
+    @classmethod
+    def _spawn_actor_checked(cls, world, blueprint_library, blueprint_id,
+                             transform, try_spawn=True, attributes=None):
+        requested_id = str(blueprint_id)
+        blueprint = cls._find_blueprint_checked(
+            blueprint_library,
+            requested_id,
+        )
+
+        for attribute_name, attribute_value in (attributes or {}).items():
+            if blueprint.has_attribute(attribute_name):
+                blueprint.set_attribute(
+                    attribute_name,
+                    str(attribute_value),
+                )
+
+        spawn = world.try_spawn_actor if try_spawn else world.spawn_actor
+        actor = spawn(blueprint, transform)
+        if actor is None:
+            raise RuntimeError(
+                f"CARLA could not spawn blueprint '{requested_id}'."
+            )
+
+        actual_id = str(getattr(actor, "type_id", ""))
+        if actual_id != requested_id:
+            try:
+                if getattr(actor, "is_alive", False):
+                    actor.destroy()
+            finally:
+                raise RuntimeError(
+                    "Spawned actor blueprint mismatch: requested "
+                    f"'{requested_id}', created '{actual_id}'."
+                )
+        return actor
+
+    def _record_actor_operation_result(self, operation, blueprint_id,
+                                       actor=None, error=None,
+                                       previous_actor_id=None):
+        result = {
+            "operation": operation,
+            "success": error is None,
+            "requested_blueprint_id": str(blueprint_id),
+            "actual_type_id": (
+                str(actor.type_id) if actor is not None else None
+            ),
+            "actor_id": actor.id if actor is not None else None,
+            "previous_actor_id": previous_actor_id,
+            "error": str(error) if error is not None else None,
+        }
+        with self.database.lock:
+            self.database.actor_operation_result = result
+        return result
+
     def run(self):
         try:
             self._run_controller()
@@ -97,6 +166,9 @@ class CarlaController:
 
             blueprint_library = world.get_blueprint_library()
             self.database.blueprint_lib = blueprint_library
+            self.database.pedestrian_blueprint_ids = (
+                get_pedestrian_blueprint_ids(blueprint_library)
+            )
             self.database.world = world
             weather = world.get_weather()
             weather_data = parse_weather_to_dict(weather)
@@ -151,21 +223,19 @@ class CarlaController:
                 break
 
             if cmd == "spawn":
-                print("Spawning actor...")
-                bp = blueprint_library.find(data["blueprint_id"])
-                print(data["blueprint_id"])
+                requested_blueprint_id = str(data["blueprint_id"])
                 transform = data["transform"]
-                if self.database.blueprint_new_data is not None:
-                    for attr_name, attr_value in self.database.blueprint_new_data.items():
-                        if bp.has_attribute(attr_name):
-                            bp.set_attribute(attr_name, str(attr_value))
-                    self.database.blueprint_new_data = None
-
-                actor = world.try_spawn_actor(bp, transform)
-
-                if actor is None:
-                    print("Spawn failed")
-                else:
+                blueprint_attributes = self.database.blueprint_new_data
+                self.database.blueprint_new_data = None
+                actor = None
+                try:
+                    actor = self._spawn_actor_checked(
+                        world,
+                        blueprint_library,
+                        requested_blueprint_id,
+                        transform,
+                        attributes=blueprint_attributes,
+                    )
                     if self.database.ghost_physic is not None:
                         actor.apply_physics_control(self.database.ghost_physic)
                     spectator = world.get_spectator()
@@ -175,7 +245,27 @@ class CarlaController:
                     with self.database.lock:
                         self.database.add_actor(actor, data["name"])
                         self.database.spawned_actor_id = actor.id
-                        print(f"Actor {data['name']} spawned with ID {actor.id}")
+                    self._record_actor_operation_result(
+                        "spawn",
+                        requested_blueprint_id,
+                        actor=actor,
+                    )
+                except Exception as error:
+                    if actor is not None:
+                        with self.database.lock:
+                            actor_is_registered = (
+                                actor.id in self.database.actors_db.actors
+                            )
+                        if (
+                            not actor_is_registered
+                            and getattr(actor, "is_alive", False)
+                        ):
+                            actor.destroy()
+                    self._record_actor_operation_result(
+                        "spawn",
+                        requested_blueprint_id,
+                        error=error,
+                    )
 
             if cmd == "change_world":
                 self._shutdown_vehicle_controls(disable_autopilot=True)
@@ -237,6 +327,11 @@ class CarlaController:
                         self.database.spawned_actor_id = None
                         self.database.world = new_world
                         self.database.blueprint_lib = new_blueprint_library
+                        self.database.pedestrian_blueprint_ids = (
+                            get_pedestrian_blueprint_ids(
+                                new_blueprint_library
+                            )
+                        )
                     self.database.sensor_event_queue.put(("sensors_cleared", None))
 
                     new_world_library = self.client.get_available_maps()
@@ -532,50 +627,101 @@ class CarlaController:
 
             if cmd == "change_actor_model":
                 blueprint_id, actor_id = data
-                if actor_id == self.movement_preview_actor_id:
-                    self.cleanup_movement_preview("actor_replaced")
-                self._destroy_walker_ai(actor_id, remove_state=True)
-                self._release_vehicle_control(
-                    actor_id,
-                    disable_autopilot=True,
-                )
-                with self.database.lock:
-                    if actor_id in self.database.actors_db.actors:
-                        self.remove_sensors_for_parent(actor_id)
-                        actor = self.database.actors_db.actors[actor_id]
-                        transform = actor.get_transform()
-                        name = self.database.actors_db.actors_db[actor_id].user_name
-                        physics = actor.get_physics_control() if actor.type_id.startswith("vehicle.") else None
-                        actor.destroy()
-                        bp = blueprint_library.find(blueprint_id)
-                        is_destroyed = wait_and_try(lambda: not actor.is_alive, timeout=5, interval=0.5)
-                        if not is_destroyed:
-                            print(f"Failed to destroy actor {actor_id}.")
-                        if is_destroyed:
-                            transform.location.z = transform.location.z + 0.5
-                            new_actor = world.spawn_actor(bp, transform)
-                            if new_actor is not None:
-                                del self.database.actors_db.actors[actor.id]
-                                self.database.actors_db.actors_db.pop(actor.id, None)
-                                self.database.vehicle_control_states.pop(
-                                    actor.id,
-                                    None,
-                                )
-                                self.database.walker_ai_states.pop(actor.id, None)
-                                if physics is not None:
-                                    new_actor.apply_physics_control(physics)
-                                self.database.add_actor(new_actor, name)
-                                self.database.spawned_actor_id = new_actor.id
-                                print(f"Actor {actor_id} changed to {blueprint_id} successfully.")
-                            else:
-                                print(f"Failed to change actor {actor_id} to {blueprint_id}.")
-                                del self.database.actors_db.actors[actor.id]
-                                self.database.actors_db.actors_db.pop(actor.id, None)
-                                self.database.vehicle_control_states.pop(
-                                    actor.id,
-                                    None,
-                                )
-                                self.database.walker_ai_states.pop(actor.id, None)
+                requested_blueprint_id = str(blueprint_id)
+                actor_id = int(actor_id)
+                old_actor = None
+                new_actor = None
+                try:
+                    # Validate the requested ID before destroying the old actor.
+                    self._find_blueprint_checked(
+                        blueprint_library,
+                        requested_blueprint_id,
+                    )
+                    with self.database.lock:
+                        old_actor = self.database.actors_db.actors.get(
+                            actor_id
+                        )
+                        actor_info = self.database.actors_db.actors_db.get(
+                            actor_id
+                        )
+                    if old_actor is None or actor_info is None:
+                        raise RuntimeError(
+                            f"Actor {actor_id} is no longer available."
+                        )
+
+                    if actor_id == self.movement_preview_actor_id:
+                        self.cleanup_movement_preview("actor_replaced")
+                    self._destroy_walker_ai(actor_id, remove_state=True)
+                    self._release_vehicle_control(
+                        actor_id,
+                        disable_autopilot=True,
+                    )
+                    self.remove_sensors_for_parent(actor_id)
+
+                    transform = old_actor.get_transform()
+                    name = actor_info.user_name
+                    physics = (
+                        old_actor.get_physics_control()
+                        if old_actor.type_id.startswith("vehicle.")
+                        else None
+                    )
+                    old_actor.destroy()
+                    is_destroyed = wait_and_try(
+                        lambda: not old_actor.is_alive,
+                        timeout=5,
+                        interval=0.5,
+                    )
+                    if not is_destroyed:
+                        raise RuntimeError(
+                            f"Failed to destroy actor {actor_id}."
+                        )
+
+                    with self.database.lock:
+                        self.database.actors_db.actors.pop(actor_id, None)
+                        self.database.actors_db.actors_db.pop(actor_id, None)
+                        self.database.vehicle_control_states.pop(
+                            actor_id,
+                            None,
+                        )
+                        self.database.walker_ai_states.pop(actor_id, None)
+
+                    transform.location.z += 0.5
+                    new_actor = self._spawn_actor_checked(
+                        world,
+                        blueprint_library,
+                        requested_blueprint_id,
+                        transform,
+                        try_spawn=False,
+                    )
+                    if physics is not None:
+                        new_actor.apply_physics_control(physics)
+                    with self.database.lock:
+                        self.database.add_actor(new_actor, name)
+                        self.database.spawned_actor_id = new_actor.id
+                    self._record_actor_operation_result(
+                        "change_model",
+                        requested_blueprint_id,
+                        actor=new_actor,
+                        previous_actor_id=actor_id,
+                    )
+                except Exception as error:
+                    if new_actor is not None:
+                        with self.database.lock:
+                            new_actor_is_registered = (
+                                new_actor.id
+                                in self.database.actors_db.actors
+                            )
+                        if (
+                            not new_actor_is_registered
+                            and getattr(new_actor, "is_alive", False)
+                        ):
+                            new_actor.destroy()
+                    self._record_actor_operation_result(
+                        "change_model",
+                        requested_blueprint_id,
+                        error=error,
+                        previous_actor_id=actor_id,
+                    )
 
             if cmd == "set_actor_transform":
                 transform, actor_id = data
@@ -1378,84 +1524,183 @@ class CarlaController:
             )
         return value
 
-    def _get_or_create_walker_controller(self, world, walker):
-        controller = self.walker_ai_controllers.get(walker.id)
-        if controller is not None and getattr(controller, "is_alive", False):
-            return controller, False
-
-        blueprint = world.get_blueprint_library().find("controller.ai.walker")
-        controller = world.spawn_actor(
-            blueprint,
-            carla.Transform(),
-            attach_to=walker,
+    @staticmethod
+    def _walker_fallback_direction(current_location, target):
+        delta_x = float(target.x) - float(current_location.x)
+        delta_y = float(target.y) - float(current_location.y)
+        length = (delta_x ** 2 + delta_y ** 2) ** 0.5
+        if length <= 1e-6:
+            return carla.Vector3D(x=1.0, y=0.0, z=0.0)
+        return carla.Vector3D(
+            x=delta_x / length,
+            y=delta_y / length,
+            z=0.0,
         )
-        if controller is None:
-            raise RuntimeError("CARLA did not create the Walker AI controller.")
-        self.walker_ai_controllers[walker.id] = controller
-        self.walker_ai_runtime[walker.id] = {
-            "target": None,
-            "next_check": 0.0,
-            "last_distance": None,
-            "last_progress_at": time.monotonic(),
-            "last_progress_sim_time": None,
-            "last_frame": None,
-        }
-        with self.database.lock:
-            state = self.database.walker_ai_states[walker.id]
-            state["controller_id"] = controller.id
-        return controller, True
 
-    def _assign_walker_target(self, world, walker, controller,
-                              reason="random navigation"):
-        runtime = self.walker_ai_runtime.setdefault(walker.id, {})
+    @classmethod
+    def _walker_initial_fallback_direction(cls, walker, location, target):
+        try:
+            forward = walker.get_transform().get_forward_vector()
+            length = (
+                float(forward.x) ** 2 + float(forward.y) ** 2
+            ) ** 0.5
+            if length > 1e-6:
+                return carla.Vector3D(
+                    x=float(forward.x) / length,
+                    y=float(forward.y) / length,
+                    z=0.0,
+                )
+        except (AttributeError, RuntimeError):
+            pass
+        return cls._walker_fallback_direction(location, target)
+
+    @staticmethod
+    def _apply_walker_fallback_control(walker, direction, speed):
+        walker.apply_control(carla.WalkerControl(
+            direction,
+            float(speed),
+            False,
+        ))
+
+    def _service_walker_fallback(self, world, walker_id, walker,
+                                 simulation_time):
+        runtime = self.walker_ai_runtime[walker_id]
+        now = time.monotonic()
+        location = walker.get_location()
+        direction = runtime.get("fallback_direction")
+        if direction is None:
+            target = runtime.get("target") or location
+            direction = self._walker_fallback_direction(location, target)
+
+        last_location = runtime.get("fallback_last_location")
+        progressed = (
+            last_location is None
+            or self._walker_distance(location, last_location) >= 0.05
+        )
+        if progressed:
+            runtime["fallback_last_location"] = location
+            runtime["fallback_last_progress_at"] = now
+            if simulation_time is not None:
+                runtime["fallback_last_progress_sim_time"] = simulation_time
+
+        progress_sim_time = runtime.get("fallback_last_progress_sim_time")
+        if simulation_time is not None and progress_sim_time is not None:
+            stalled = (
+                simulation_time - progress_sim_time
+                >= self.WALKER_AI_FALLBACK_STALL_SECONDS
+            )
+        else:
+            stalled = (
+                now - runtime.get("fallback_last_progress_at", now)
+                >= self.WALKER_AI_FALLBACK_STALL_SECONDS
+            )
+
+        origin = runtime.get("fallback_origin") or location
+        leg_finished = (
+            self._walker_distance(location, origin)
+            >= self.WALKER_AI_FALLBACK_LEG_DISTANCE
+        )
+        status_changed = False
+        if stalled:
+            direction = carla.Vector3D(
+                x=-float(direction.y),
+                y=float(direction.x),
+                z=0.0,
+            )
+            runtime.update({
+                "fallback_origin": location,
+                "fallback_last_location": location,
+                "fallback_last_progress_at": now,
+                "fallback_last_progress_sim_time": simulation_time,
+            })
+            with self.database.lock:
+                self.database.walker_ai_states[walker_id]["status"] = (
+                    "Walker AI fallback steering changed direction after "
+                    "detecting an obstacle."
+                )
+            status_changed = True
+        elif leg_finished:
+            target = world.get_random_location_from_navigation()
+            if target is not None:
+                runtime["target"] = target
+                direction = self._walker_fallback_direction(location, target)
+                with self.database.lock:
+                    state = self.database.walker_ai_states[walker_id]
+                    state["target"] = self._serialize_location(target)
+                    state["status"] = (
+                        "Walker AI fallback selected a new random direction."
+                    )
+                status_changed = True
+            else:
+                direction = carla.Vector3D(
+                    x=-float(direction.y),
+                    y=float(direction.x),
+                    z=0.0,
+                )
+            runtime.update({
+                "fallback_origin": location,
+                "fallback_last_location": location,
+                "fallback_last_progress_at": now,
+                "fallback_last_progress_sim_time": simulation_time,
+            })
+
+        runtime["fallback_direction"] = direction
+        with self.database.lock:
+            speed = self.database.walker_ai_states[walker_id]["speed"]
+        self._apply_walker_fallback_control(walker, direction, speed)
+        return status_changed
+
+    def _start_walker_direct_control(self, world, walker, speed):
+        now = time.monotonic()
+        location = walker.get_location()
         target = None
-        current_location = walker.get_location()
         for _attempt in range(5):
             candidate = world.get_random_location_from_navigation()
             if candidate is None:
                 continue
             target = candidate
-            if self._walker_distance(current_location, candidate) > 1.0:
+            if self._walker_distance(location, candidate) > 1.0:
                 break
 
-        now = time.monotonic()
-        if target is None:
-            runtime.update({
-                "target": None,
-                "next_check": now + self.WALKER_AI_TARGET_RETRY_SECONDS,
-                "last_distance": None,
-                "last_progress_at": now,
-                "last_progress_sim_time": None,
-            })
-            with self.database.lock:
-                state = self.database.walker_ai_states[walker.id]
-                state.update({
-                    "target": None,
-                    "status": (
-                        "Walker AI is active but no navigation point is "
-                        "currently available; retrying."
-                    ),
-                    "error": None,
-                })
-            return False
-
-        controller.go_to_location(target)
-        distance = self._walker_distance(current_location, target)
+        direction_target = target or location
+        direction = self._walker_initial_fallback_direction(
+            walker,
+            location,
+            direction_target,
+        )
+        runtime = self.walker_ai_runtime.setdefault(walker.id, {})
         runtime.update({
             "target": target,
             "next_check": now + self.WALKER_AI_CHECK_INTERVAL_SECONDS,
-            "last_distance": distance,
+            "last_distance": None,
             "last_progress_at": now,
             "last_progress_sim_time": None,
+            "last_frame": None,
+            "fallback_active": True,
+            "fallback_direction": direction,
+            "fallback_origin": location,
+            "fallback_last_location": location,
+            "fallback_last_progress_at": now,
+            "fallback_last_progress_sim_time": None,
         })
         with self.database.lock:
             state = self.database.walker_ai_states[walker.id]
             state.update({
+                "mode": WALKER_AI_RUNNING,
+                "active": True,
+                "speed": speed,
+                "controller_id": None,
                 "target": self._serialize_location(target),
-                "status": f"Walker AI running: {reason}.",
+                "random_navigation": True,
+                "status": (
+                    "Walker autopilot running with direct control."
+                    if target is not None else
+                    "Walker autopilot running; no navigation point is "
+                    "available, using the actor heading."
+                ),
                 "error": None,
             })
-        return True
+        self._apply_walker_fallback_control(walker, direction, speed)
 
     def _set_walker_ai_enabled(self, world, data):
         session_id = data["session_id"]
@@ -1470,37 +1715,7 @@ class CarlaController:
 
             if data["enabled"]:
                 speed = self._validate_walker_speed(data["speed"])
-                controller, controller_created = (
-                    self._get_or_create_walker_controller(
-                        world,
-                        walker,
-                    )
-                )
-                with self.database.lock:
-                    was_active = self.database.walker_ai_states[walker_id][
-                        "active"
-                    ]
-                if controller_created or not was_active:
-                    controller.start()
-                controller.set_max_speed(speed)
-                with self.database.lock:
-                    state = self.database.walker_ai_states[walker_id]
-                    state.update({
-                        "mode": WALKER_AI_RUNNING,
-                        "active": True,
-                        "speed": speed,
-                        "controller_id": controller.id,
-                        "random_navigation": True,
-                        "error": None,
-                    })
-                runtime = self.walker_ai_runtime.get(walker_id, {})
-                if runtime.get("target") is None:
-                    self._assign_walker_target(
-                        world,
-                        walker,
-                        controller,
-                        "random navigation started",
-                    )
+                self._start_walker_direct_control(world, walker, speed)
             else:
                 with self.database.lock:
                     saved_speed = self.database.walker_ai_states[walker_id][
@@ -1525,7 +1740,16 @@ class CarlaController:
                     "last_progress_at": time.monotonic(),
                     "last_progress_sim_time": None,
                     "last_frame": None,
+                    "fallback_active": False,
+                    "fallback_direction": None,
+                    "fallback_origin": None,
+                    "fallback_last_location": None,
                 })
+                self._apply_walker_fallback_control(
+                    walker,
+                    carla.Vector3D(x=0.0, y=0.0, z=0.0),
+                    0.0,
+                )
                 with self.database.lock:
                     state = self.database.walker_ai_states[walker_id]
                     state.update({
@@ -1560,9 +1784,24 @@ class CarlaController:
                 active = state["active"]
             controller = self.walker_ai_controllers.get(walker_id)
             if active:
-                if controller is None or not getattr(controller, "is_alive", False):
+                runtime = self.walker_ai_runtime.get(walker_id, {})
+                if runtime.get("fallback_active"):
+                    direction = runtime.get("fallback_direction")
+                    if direction is not None:
+                        walker = self._get_managed_walker(walker_id)
+                        self._apply_walker_fallback_control(
+                            walker,
+                            direction,
+                            speed,
+                        )
+                elif controller is None or not getattr(
+                    controller,
+                    "is_alive",
+                    False,
+                ):
                     raise RuntimeError("The Walker AI controller is unavailable.")
-                controller.set_max_speed(speed)
+                else:
+                    controller.set_max_speed(speed)
             with self.database.lock:
                 state = self.database.walker_ai_states[walker_id]
                 state["speed"] = speed
@@ -1608,76 +1847,29 @@ class CarlaController:
                 "last_progress_at": now,
                 "last_progress_sim_time": None,
                 "last_frame": None,
+                "fallback_active": False,
+                "fallback_direction": None,
+                "fallback_origin": None,
+                "fallback_last_location": None,
+                "fallback_last_progress_at": None,
+                "fallback_last_progress_sim_time": None,
             })
             if now < runtime.get("next_check", 0.0):
                 continue
             runtime["next_check"] = now + self.WALKER_AI_CHECK_INTERVAL_SECONDS
             try:
                 walker = self._get_managed_walker(walker_id)
-                controller = self.walker_ai_controllers.get(walker_id)
-                if controller is None or not getattr(controller, "is_alive", False):
-                    raise RuntimeError("The Walker AI controller is unavailable.")
-
-                target = runtime.get("target")
-                if target is None:
-                    changed = self._assign_walker_target(
-                        world,
-                        walker,
-                        controller,
-                        "navigation point acquired",
-                    )
-                    if changed:
-                        self._publish_walker_ai_state(walker_id)
-                    continue
-
                 if frame is None or runtime.get("last_frame") == frame:
                     continue
                 runtime["last_frame"] = frame
 
-                distance = self._walker_distance(walker.get_location(), target)
-                if distance <= self.WALKER_AI_REACHED_DISTANCE:
-                    self._assign_walker_target(
-                        world,
-                        walker,
-                        controller,
-                        "destination reached; new random destination selected",
-                    )
-                    self._publish_walker_ai_state(walker_id)
-                    continue
-
-                last_distance = runtime.get("last_distance")
-                is_stalled = False
-                if (
-                    simulation_time is not None
-                    and runtime.get("last_progress_sim_time") is None
-                ):
-                    runtime["last_progress_sim_time"] = simulation_time
-                if (
-                    last_distance is None
-                    or distance <= last_distance - self.WALKER_AI_PROGRESS_DISTANCE
-                ):
-                    runtime["last_distance"] = distance
-                    runtime["last_progress_at"] = now
-                    if simulation_time is not None:
-                        runtime["last_progress_sim_time"] = simulation_time
-                elif simulation_time is not None:
-                    is_stalled = (
-                        simulation_time
-                        - runtime.get("last_progress_sim_time", simulation_time)
-                        >= self.WALKER_AI_STALL_SECONDS
-                    )
-                else:
-                    is_stalled = (
-                        now - runtime.get("last_progress_at", now)
-                        >= self.WALKER_AI_STALL_SECONDS
-                    )
-                if last_distance is not None and is_stalled:
-                    self._assign_walker_target(
-                        world,
-                        walker,
-                        controller,
-                        "no progress; new random destination selected",
-                    )
+                changed = self._service_walker_fallback(
+                    world,
+                    walker_id,
+                    walker,
+                    simulation_time,
+                )
+                if changed:
                     self._publish_walker_ai_state(walker_id)
             except Exception as error:
                 self._walker_ai_failure(walker_id, error)
@@ -1706,6 +1898,17 @@ class CarlaController:
         )
 
     def _destroy_walker_ai(self, walker_id, remove_state=False):
+        try:
+            with self.database.lock:
+                walker = self.database.actors_db.actors.get(walker_id)
+            if walker is not None and getattr(walker, "is_alive", False):
+                self._apply_walker_fallback_control(
+                    walker,
+                    carla.Vector3D(x=0.0, y=0.0, z=0.0),
+                    0.0,
+                )
+        except Exception as error:
+            self.dashboard_monitor.record_error(error)
         controller = self.walker_ai_controllers.pop(walker_id, None)
         self.walker_ai_runtime.pop(walker_id, None)
         if controller is not None:

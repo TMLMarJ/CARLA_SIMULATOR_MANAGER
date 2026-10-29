@@ -1,8 +1,15 @@
 import tkinter as tk
-from tkinter import ttk
-from pygments.lexers import blueprint
+from tkinter import messagebox, ttk
 
-from utilities.functions import filter_carla_id_by_type, return_data_from_transform, wait_and_try
+from utilities.functions import (
+    filter_carla_id_by_type,
+    get_pedestrian_blueprint_ids,
+    pedestrian_blueprint_options,
+    resolve_blueprint_selection,
+    return_data_from_transform,
+    select_available_blueprint_id,
+    wait_and_try,
+)
 from gui_contents.spawn_preview import ActorPreviewFrame, GhostPreview
 from gui_contents.ActorEditView import EntityEditWindow
 from gui_contents.change_model_top import ChangeModelTop
@@ -28,7 +35,12 @@ class CustomPedestrianFrame(tk.Frame):
         self._pedestrian_variables_definition()
         self._pedestrian_frame_setup()
 
-    def spawn_ghost(self, blueprint_id="walker.pedestrian.0001", transform=None):
+    def spawn_ghost(self, blueprint_id=None, transform=None):
+        if blueprint_id is None:
+            try:
+                blueprint_id = self._selected_blueprint_id()
+            except ValueError:
+                return
         self.actor_preview.spawn(blueprint_id=blueprint_id, transform=transform)
 
     def _pedestrian_variables_definition(self):
@@ -52,6 +64,42 @@ class CustomPedestrianFrame(tk.Frame):
 
         self.choose_model = tk.StringVar()
         self.actor_model = {}
+
+    def _available_pedestrian_blueprint_ids(self):
+        blueprint_ids = list(
+            getattr(self.database, "pedestrian_blueprint_ids", [])
+        )
+        if not blueprint_ids:
+            blueprint_ids = get_pedestrian_blueprint_ids(
+                self.database.blueprint_lib
+            )
+        return blueprint_ids
+
+    def _selected_blueprint_id(self):
+        return resolve_blueprint_selection(
+            self.actor_model,
+            self.choose_model.get(),
+        )
+
+    def _refresh_blueprint_models(self, preserve_selection=True):
+        previous_blueprint_id = None
+        if preserve_selection:
+            try:
+                previous_blueprint_id = self._selected_blueprint_id()
+            except ValueError:
+                selected_value = self.choose_model.get()
+                if str(selected_value).startswith("walker.pedestrian."):
+                    previous_blueprint_id = selected_value
+
+        blueprint_ids = self._available_pedestrian_blueprint_ids()
+        self.actor_model = pedestrian_blueprint_options(blueprint_ids)
+        self.actor_model_combobox["values"] = list(self.actor_model.keys())
+        selected_id = select_available_blueprint_id(
+            blueprint_ids,
+            previous_blueprint_id,
+        )
+        self.choose_model.set(selected_id)
+        return selected_id
 
     def _pedestrian_frame_setup(self):
         upper_frame = ttk.LabelFrame(
@@ -117,10 +165,8 @@ class CustomPedestrianFrame(tk.Frame):
         model_label = ttk.Label(model_frame, text="Model", background=self.default_color, font=("Arial", 11, "bold"))
         model_label.grid(row=0, column=0, sticky="w", pady=(0, 5))
 
-        self.actor_model = filter_carla_id_by_type("walker", "pedestrian", self.database.blueprint_lib) #TODO: check
         self.actor_model_combobox = ttk.Combobox(model_frame, textvariable=self.choose_model, state="readonly")
-        self.actor_model_combobox["values"] = list(self.actor_model.keys())
-        self.actor_model_combobox.current(0)
+        self._refresh_blueprint_models(preserve_selection=False)
         self.actor_model_combobox.bind("<<ComboboxSelected>>", self._on_model_change)
         self.actor_model_combobox.grid(row=1, column=0, sticky="ew")
 
@@ -264,35 +310,81 @@ class CustomPedestrianFrame(tk.Frame):
         selected_actor = self.actor_table.tree.selection()
         if not selected_actor:
             return
-        actor_model = filter_carla_id_by_type("walker", selected_class, self.database.blueprint_lib)
-        blueprint_id = actor_model[selected_model]
+        actor_model = filter_carla_id_by_type(
+            "walker",
+            selected_class,
+            self.database.blueprint_lib,
+        )
+        try:
+            blueprint_id = resolve_blueprint_selection(
+                actor_model,
+                selected_model,
+            )
+        except ValueError as error:
+            messagebox.showerror("Change Pedestrian Model", str(error))
+            return
         selected_actor_id = self.actor_table.tree.item(selected_actor)["values"][1]
         self.controller.close_movement_control_for_actor(
             selected_actor_id,
             "Selected pedestrian is being replaced",
         )
-        self.controller.carla.change_actor_model(blueprint_id, self.database.actors_db.actors[selected_actor_id].id)
+        with self.database.lock:
+            self.database.spawned_actor_id = None
+            self.database.actor_operation_result = None
+        self.controller.carla.change_actor_model(
+            blueprint_id,
+            selected_actor_id,
+        )
+
+        is_changed = wait_and_try(
+            lambda: self.database.actor_operation_result is not None
+        )
+        with self.database.lock:
+            result = self.database.actor_operation_result
+        if not is_changed or result is None:
+            messagebox.showerror(
+                "Change Pedestrian Model",
+                "Timed out while changing the pedestrian model.",
+            )
+            return
+        if not result["success"]:
+            messagebox.showerror(
+                "Change Pedestrian Model",
+                result["error"],
+            )
+            self.actor_table.refresh_table()
+            return
 
         try:
-            is_changed = wait_and_try(
-                lambda: self.database.spawned_actor_id is not None
-            )
-            if is_changed:
-                actor_id = self.database.actors_db.actors[self.database.spawned_actor_id].id
-                new_actor_model = selected_class.upper() + ":" + selected_model
-                self.actor_table.tree.item(selected_actor, values=(
-                    self.actor_table.tree.item(selected_actor)["values"][0],
-                    actor_id,
-                    new_actor_model,
-                    self.actor_table.tree.item(selected_actor)["values"][3],
-                    self.actor_table.tree.item(selected_actor)["values"][4],
-                    self.actor_table.tree.item(selected_actor)["values"][5],
-                    self.actor_table.tree.item(selected_actor)["values"][6]
-                ))
+            if (
+                result["requested_blueprint_id"] != blueprint_id
+                or result["actual_type_id"] != blueprint_id
+            ):
+                raise RuntimeError(
+                    "Pedestrian model verification failed after replacement."
+                )
+            actor_id = result["actor_id"]
+            with self.database.lock:
+                actor = self.database.actors_db.actors[actor_id]
+            if actor.type_id != blueprint_id:
+                raise RuntimeError(
+                    "DataStorage contains a pedestrian with an unexpected "
+                    f"type: '{actor.type_id}'."
+                )
+            self.actor_table.tree.item(selected_actor, values=(
+                self.actor_table.tree.item(selected_actor)["values"][0],
+                actor_id,
+                actor.type_id,
+                self.actor_table.tree.item(selected_actor)["values"][3],
+                self.actor_table.tree.item(selected_actor)["values"][4],
+                self.actor_table.tree.item(selected_actor)["values"][5],
+                self.actor_table.tree.item(selected_actor)["values"][6]
+            ))
+            with self.database.lock:
                 self.database.spawned_actor_id = None
-        except KeyError:
-            actor_id = None
-            print("Database update failed. Pedestrian not found in database.")
+        except (KeyError, RuntimeError) as error:
+            messagebox.showerror("Change Pedestrian Model", str(error))
+            self.actor_table.refresh_table()
 
     def _update_location_from_spawn_point(self, event):
         spawn_point_num = int(str(self.selected_spawn_point.get()).split(":")[0])
@@ -318,7 +410,11 @@ class CustomPedestrianFrame(tk.Frame):
 
     def update_spawn_point(self):
         self.combobox_spawn_points["values"] = [f"{i}:{point}" for i, point in enumerate(self.database.available_spawn_points)]
-        self.combobox_spawn_points.current(0)
+        if self.database.available_spawn_points:
+            self.combobox_spawn_points.current(0)
+        else:
+            self.selected_spawn_point.set("")
+        self._refresh_blueprint_models(preserve_selection=True)
 
     def destroy_ghost(self):
         if self.actor_preview:
@@ -326,7 +422,11 @@ class CustomPedestrianFrame(tk.Frame):
             self.image_frame.update_image()
 
     def _on_model_change(self, event):
-        selected_model = self.actor_model[self.actor_model_combobox.get()]
+        try:
+            selected_model = self._selected_blueprint_id()
+        except ValueError as error:
+            messagebox.showerror("Pedestrian Model", str(error))
+            return
         if self.actor_preview:
             transform = self.actor_preview.get_transform()
             self.destroy_ghost()
@@ -343,7 +443,7 @@ class CustomPedestrianFrame(tk.Frame):
         actor_info = {
             "name": actor_name,
             "carla_id": None,
-            "type_id": self.choose_model.get(),
+            "type_id": self._selected_blueprint_id(),
             "location": f"{x_pos:.2f}, {y_pos:.2f}, {z_pos:.2f}",
             "rotation": f"{pitch_pos:.2f}, {yaw_pos:.2f}, {roll_pos:.2f}",
             "sensors": "",  # TODO: Implement sensor information retrieval when the sensor management is implemented
@@ -352,8 +452,10 @@ class CustomPedestrianFrame(tk.Frame):
         return actor_info
 
     def spawn_actor(self):
-        selected_model = self.choose_model.get()
-        if selected_model not in self.actor_model:
+        try:
+            blueprint_id = self._selected_blueprint_id()
+        except ValueError as error:
+            messagebox.showerror("Spawn Pedestrian", str(error))
             return
 
         actor_name = self.actor_name_var.get()
@@ -373,29 +475,53 @@ class CustomPedestrianFrame(tk.Frame):
             "name": actor_name,
             "transform": transform,
             "sensors": "",  # TODO: Implement sensor information retrieval.
-            "blueprint_id": self.actor_model[selected_model],
+            "blueprint_id": blueprint_id,
         }
 
         actor_data = self.get_actor_info()
         self.destroy_ghost()
-        self.database.spawned_actor_id = None
+        with self.database.lock:
+            self.database.spawned_actor_id = None
+            self.database.actor_operation_result = None
         self.controller.carla.spawn_actor(data)
 
-        try:
-            is_spawned = wait_and_try(
-                lambda: self.database.spawned_actor_id is not None
+        is_spawned = wait_and_try(
+            lambda: self.database.actor_operation_result is not None
+        )
+        with self.database.lock:
+            result = self.database.actor_operation_result
+        if not is_spawned or result is None:
+            messagebox.showerror(
+                "Spawn Pedestrian",
+                "Timed out while spawning the pedestrian.",
             )
-            if is_spawned:
-                actor_id = self.database.spawned_actor_id
+        elif not result["success"]:
+            messagebox.showerror("Spawn Pedestrian", result["error"])
+        elif (
+            result["requested_blueprint_id"] != blueprint_id
+            or result["actual_type_id"] != blueprint_id
+        ):
+            messagebox.showerror(
+                "Spawn Pedestrian",
+                "Pedestrian blueprint verification failed after spawn.",
+            )
+        else:
+            actor_id = result["actor_id"]
+            with self.database.lock:
+                actor = self.database.actors_db.actors.get(actor_id)
+            if actor is None or actor.type_id != blueprint_id:
+                messagebox.showerror(
+                    "Spawn Pedestrian",
+                    "DataStorage does not contain the verified pedestrian.",
+                )
+            else:
                 actor_data["carla_id"] = actor_id
+                actor_data["type_id"] = actor.type_id
                 actor_data["is_active"] = "Active"
                 self.actor_table.add_actor_to_table(actor_data)
-                self.database.spawned_actor_id = None
+                with self.database.lock:
+                    self.database.spawned_actor_id = None
                 self.reset_tab()
-            else:
-                print("Failed to spawn pedestrian.")
-        except KeyError:
-            print("Database update failed. Pedestrian not found in database.")
 
         self.spawn_ghost()
 
@@ -415,8 +541,9 @@ class CustomPedestrianFrame(tk.Frame):
             self.actor_table.tree.delete(selected_actor)
 
     def edit_actor(self):
-        selected_model = self.actor_model.get(self.choose_model.get())
-        if selected_model is None:
+        try:
+            selected_model = self._selected_blueprint_id()
+        except ValueError:
             return
         EntityEditWindow(
             self,

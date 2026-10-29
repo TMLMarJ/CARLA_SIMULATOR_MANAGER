@@ -19,6 +19,7 @@ class DataStorage:
         self.walker_ai_states = {}
         self.simulation_event_queue = queue.Queue()
         self.blueprint_lib = None
+        self.pedestrian_blueprint_ids = []
         self.world = None
         self.ghost_data = None
         self.ghost_camera = None
@@ -31,6 +32,7 @@ class DataStorage:
         self.world_change_error = None
         self.available_spawn_points = []
         self.spawned_actor_id = None
+        self.actor_operation_result = None
         self.blueprint_new_data = None
         self.physics_applied = False
         self.actual_simulation_settings = None
