@@ -195,7 +195,7 @@ class CustomPedestrianFrame(tk.Frame):
 
         button_control_frame = ttk.Frame(lower_frame, style="new.TFrame")
         button_control_frame.grid(row=1, column=0, sticky="ew", padx=20, pady=(0, 12))
-        for index in range(4):
+        for index in range(5):
             button_control_frame.grid_columnconfigure(index, weight=1)
 
         #==================================== Buttons ===================================
@@ -211,6 +211,20 @@ class CustomPedestrianFrame(tk.Frame):
         update_location_button.grid(row=0, column=2, sticky="ew", pady=(0, 8), padx=(0, 10))
         copy_button = ttk.Button(button_control_frame, text="Copy Pedestrian", command=self.copy_actor, width=18)
         copy_button.grid(row=0, column=3, sticky="ew", pady=(0, 8), padx=(0, 10))
+        movement_button = ttk.Button(
+            button_control_frame,
+            text="Movement Control",
+            command=self.open_movement_control,
+            width=18,
+        )
+        movement_button.grid(row=0, column=4, sticky="ew", pady=(0, 8))
+
+    def open_movement_control(self):
+        selected_actor = self.actor_table.tree.selection()
+        if not selected_actor:
+            return
+        actor_id = self.actor_table.tree.item(selected_actor[0])["values"][1]
+        self.controller.open_movement_control(actor_id)
 
     def update_location(self, event=None):
         if not self.actor_table.tree.selection():
@@ -253,6 +267,10 @@ class CustomPedestrianFrame(tk.Frame):
         actor_model = filter_carla_id_by_type("walker", selected_class, self.database.blueprint_lib)
         blueprint_id = actor_model[selected_model]
         selected_actor_id = self.actor_table.tree.item(selected_actor)["values"][1]
+        self.controller.close_movement_control_for_actor(
+            selected_actor_id,
+            "Selected pedestrian is being replaced",
+        )
         self.controller.carla.change_actor_model(blueprint_id, self.database.actors_db.actors[selected_actor_id].id)
 
         try:
@@ -389,6 +407,10 @@ class CustomPedestrianFrame(tk.Frame):
         selected_actor = self.actor_table.tree.selection()
         if selected_actor:
             actor_id = self.actor_table.tree.item(selected_actor)["values"][1]
+            self.controller.close_movement_control_for_actor(
+                actor_id,
+                "Selected pedestrian removed",
+            )
             self.controller.carla.remove_actor(actor_id)
             self.actor_table.tree.delete(selected_actor)
 

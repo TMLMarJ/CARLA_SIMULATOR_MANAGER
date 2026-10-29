@@ -22,8 +22,9 @@ from gui_contents.pedestrians import CustomPedestrianFrame
 from gui_contents.static_objects import CustomStaticObjectFrame
 from gui_contents.sensors import CustomSensorFrame
 from gui_contents.StyleSettings import settings
-from gui_contents.main_gui_view import CustomMainViewFrame
+from gui_contents.main_gui_view import CustomMainViewFrame, SimulationControlFrame
 from spectator_preview import SpectatorPreviewManager
+from movement_control import MovementControlSessionManager
 
 from utilities.functions import parse_weather_to_dict, parse_weather_to_carla, wait_and_try, return_data_from_transform
 
@@ -59,6 +60,7 @@ class Manager(tk.Tk):
         self.spectator_camera_id = None
         self.spectator_check_job = None
         self.simulation_check_job = None
+        self.movement_control = MovementControlSessionManager(self)
 
         self.main_view = None
         self.create_main_window()
@@ -76,6 +78,7 @@ class Manager(tk.Tk):
             return
         print("Closing app...")
         self.closing = True
+        self.movement_control.request_close("Application closing")
         self.close_spectator_preview()
         if self.carla is None:
             self.finish_application_close()
@@ -126,7 +129,7 @@ class Manager(tk.Tk):
                         self.main_view.initialize_connected_views()
                         self.main_view.main_view.connection_frame.update_connection_state(True)
                         self.main_view.main_view.dashboard_frame.clear_context()
-                        self.main_view.main_view.simulation_frame.set_connected(
+                        self.main_view.simulation_control_frame.set_connected(
                             True,
                             self.database.actual_simulation_settings,
                             self.database.simulation_control_state,
@@ -162,9 +165,10 @@ class Manager(tk.Tk):
         self.disconnecting = False
         self.world_changing = False
         self.spectator_preview.request_stop()
+        self.movement_control.handle_disconnect()
 
         self.main_view.clear_connected_views()
-        self.main_view.main_view.simulation_frame.set_connected(False)
+        self.main_view.simulation_control_frame.set_connected(False)
 
         self.carla = None
 
@@ -197,8 +201,9 @@ class Manager(tk.Tk):
         self.main_view.actors_tab_control.unbind("<<NotebookTabChanged>>")
         self.main_view.tabControl.select(self.main_view.main_tab)
         self.main_view.set_tabs_enabled(False)
-        self.main_view.main_view.simulation_frame.set_connected(False)
+        self.main_view.simulation_control_frame.set_connected(False)
         self.main_view.main_view.dashboard_frame.show_context("Disconnected")
+        self.movement_control.request_close("CARLA disconnecting")
         self.close_spectator_preview()
         self.carla.stop_simulation_control()
         self.carla.shutdown()
@@ -215,13 +220,13 @@ class Manager(tk.Tk):
 
         with self.database.lock:
             self.database.proposed_simulation_settings = settings.copy()
-        self.main_view.main_view.simulation_frame.set_pending()
+        self.main_view.simulation_control_frame.set_pending()
         self.carla.apply_simulation_settings(settings)
 
     def set_tick_controller(self, controller):
         if not self._simulation_control_available():
             return
-        self.main_view.main_view.simulation_frame.set_control_pending(
+        self.main_view.simulation_control_frame.set_control_pending(
             "Changing tick controller..."
         )
         self.carla.set_tick_controller(controller)
@@ -229,7 +234,7 @@ class Manager(tk.Tk):
     def run_simulation(self):
         if not self._simulation_control_available():
             return
-        self.main_view.main_view.simulation_frame.set_control_pending(
+        self.main_view.simulation_control_frame.set_control_pending(
             "Starting GUI ticks..."
         )
         self.carla.run_simulation()
@@ -237,7 +242,7 @@ class Manager(tk.Tk):
     def pause_simulation(self):
         if not self._simulation_control_available():
             return
-        self.main_view.main_view.simulation_frame.set_control_pending(
+        self.main_view.simulation_control_frame.set_control_pending(
             "Stopping after the current tick..."
         )
         self.carla.pause_simulation()
@@ -245,7 +250,7 @@ class Manager(tk.Tk):
     def step_simulation(self, count=1):
         if not self._simulation_control_available():
             return
-        self.main_view.main_view.simulation_frame.set_control_pending(
+        self.main_view.simulation_control_frame.set_control_pending(
             f"Requesting {count} tick{'s' if count != 1 else ''}..."
         )
         self.carla.step_simulation(count)
@@ -276,30 +281,31 @@ class Manager(tk.Tk):
                             if status == "simulation_settings_applied"
                             else "Settings loaded"
                         )
-                        self.main_view.main_view.simulation_frame.load_settings(
+                        self.main_view.simulation_control_frame.load_settings(
                             data,
                             label,
                         )
                 elif status == "simulation_settings_error":
                     if self.connected and not self.disconnecting and not self.closing:
-                        self.main_view.main_view.simulation_frame.show_error(
+                        self.main_view.simulation_control_frame.show_error(
                             data["message"],
                             data["settings"],
                         )
                 elif status == "simulation_control_state":
                     if self.connected and not self.disconnecting and not self.closing:
-                        self.main_view.main_view.simulation_frame.update_control_state(
+                        self.main_view.simulation_control_frame.update_control_state(
                             data
                         )
                 elif status == "simulation_control_command_error":
                     if self.connected and not self.disconnecting and not self.closing:
-                        self.main_view.main_view.simulation_frame.show_control_error(
+                        self.main_view.simulation_control_frame.show_control_error(
                             data
                         )
         except queue.Empty:
             pass
 
         self._refresh_dashboard()
+        self.movement_control.poll()
 
         if self.winfo_exists():
             self.simulation_check_job = self.after(
@@ -322,7 +328,7 @@ class Manager(tk.Tk):
             )
         self.main_view.main_view.dashboard_frame.refresh(*dashboard_data)
         if self.connected and not self.disconnecting and not self.closing:
-            self.main_view.main_view.simulation_frame.update_control_observation(
+            self.main_view.simulation_control_frame.update_control_observation(
                 control_state
             )
 
@@ -361,6 +367,35 @@ class Manager(tk.Tk):
 
         if started:
             self.update_spectator_state("Starting")
+
+    def open_movement_control(self, actor_id):
+        if (
+            not self.connected
+            or self.disconnecting
+            or self.closing
+            or self.world_changing
+            or self.carla is None
+        ):
+            return
+
+        with self.database.lock:
+            actor = self.database.actors_db.actors.get(int(actor_id))
+        if actor is None or not actor.is_alive:
+            messagebox.showerror(
+                "Movement Control",
+                "The selected actor is no longer available.",
+            )
+            return
+        if not actor.type_id.startswith(("vehicle.", "walker.")):
+            messagebox.showerror(
+                "Movement Control",
+                "Movement Control supports vehicles and pedestrians only.",
+            )
+            return
+        self.movement_control.open(actor.id, actor.type_id)
+
+    def close_movement_control_for_actor(self, actor_id, reason):
+        self.movement_control.close_for_actor(actor_id, reason)
 
     def close_spectator_preview(self):
         if self.spectator_preview.request_stop():
@@ -440,8 +475,9 @@ class Manager(tk.Tk):
         if not self.connected or self.disconnecting or self.closing:
             return False
         self.world_changing = True
+        self.movement_control.request_close("World is changing")
         self.carla.stop_simulation_control()
-        self.main_view.main_view.simulation_frame.set_external_busy(True)
+        self.main_view.simulation_control_frame.set_external_busy(True)
         self.main_view.main_view.dashboard_frame.show_context("Loading World")
         if self.spectator_preview.request_stop():
             self.update_spectator_state("Stopping")
@@ -451,7 +487,7 @@ class Manager(tk.Tk):
 
     def finish_world_change(self):
         self.world_changing = False
-        self.main_view.main_view.simulation_frame.set_external_busy(False)
+        self.main_view.simulation_control_frame.set_external_busy(False)
         self.main_view.main_view.dashboard_frame.clear_context()
         if self.connected and not self.spectator_preview.is_active():
             self.update_spectator_state("Closed")
@@ -459,6 +495,11 @@ class Manager(tk.Tk):
             self.update_spectator_state(self.spectator_state)
 
     def finish_application_close(self):
+        self.movement_control.poll()
+        if self.movement_control.is_active():
+            self.after(100, self.finish_application_close)
+            return
+
         self.spectator_preview.poll_events()
         if self.spectator_preview.is_active():
             if self.spectator_preview.stop_timed_out(10.0):
@@ -499,7 +540,7 @@ class MainView(tk.Frame):
         self.world_weather_tab = ttk.Frame(self.tabControl)
         self.actors_tab = ttk.Frame(self.tabControl)
         self.sensors_tab = ttk.Frame(self.tabControl)
-        self.movement_tab = ttk.Frame(self.tabControl)
+        self.simulation_control_tab = ttk.Frame(self.tabControl)
 
         self.actors_tab_control = ttk.Notebook(self.actors_tab)
         self.vehicle_tab = ttk.Frame(self.actors_tab_control)
@@ -512,6 +553,17 @@ class MainView(tk.Frame):
 
         self.main_view = CustomMainViewFrame(self.main_tab, self.manager)
         self.main_view.pack(expand=1, fill="both")
+
+        self.simulation_control_frame = SimulationControlFrame(
+            self.simulation_control_tab,
+            self.manager,
+        )
+        self.simulation_control_frame.pack(
+            expand=True,
+            fill="both",
+            padx=8,
+            pady=8,
+        )
 
         self.world_weather_frame = None
         self.vehicle_frame = None
@@ -528,12 +580,21 @@ class MainView(tk.Frame):
     def connected(self):
         return self.manager.connected
 
+    def open_movement_control(self, actor_id):
+        self.manager.open_movement_control(actor_id)
+
+    def close_movement_control_for_actor(self, actor_id, reason):
+        self.manager.close_movement_control_for_actor(actor_id, reason)
+
     def _control_tab_setup(self):
         self.tabControl.add(self.main_tab, text="Main View")
         self.tabControl.add(self.world_weather_tab, text="World & Weather")
         self.tabControl.add(self.actors_tab, text="Actors")
         self.tabControl.add(self.sensors_tab, text="Sensors")
-        self.tabControl.add(self.movement_tab, text="Movement")
+        self.tabControl.add(
+            self.simulation_control_tab,
+            text="Simulation Control",
+        )
 
         self.actors_tab_control.add(self.vehicle_tab, text="Vehicles")
         self.actors_tab_control.add(self.actor_tab, text="Pedestrians")

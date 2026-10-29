@@ -215,7 +215,7 @@ class CustomVehicleFrame(tk.Frame):
 
         button_control_frame = ttk.Frame(lower_frame, style="new.TFrame")
         button_control_frame.grid(row=1, column=0, sticky="ew", padx=20, pady=(0, 12))
-        for index in range(4):
+        for index in range(5):
             button_control_frame.grid_columnconfigure(index, weight=1)
 
         #==================================== Buttons ===================================
@@ -231,6 +231,22 @@ class CustomVehicleFrame(tk.Frame):
         update_location_button.grid(row=0, column=2, sticky="ew", pady=(0, 8), padx=(0, 10))
         copy_button = ttk.Button(button_control_frame, text="Copy Vehicle", command=self.copy_vehicle, width=18)
         copy_button.grid(row=0, column=3, sticky="ew", pady=(0, 8), padx=(0, 10))
+        movement_button = ttk.Button(
+            button_control_frame,
+            text="Movement Control",
+            command=self.open_movement_control,
+            width=18,
+        )
+        movement_button.grid(row=0, column=4, sticky="ew", pady=(0, 8))
+
+    def open_movement_control(self):
+        selected_vehicle = self.vehicle_table.tree.selection()
+        if not selected_vehicle:
+            return
+        vehicle_id = self.vehicle_table.tree.item(
+            selected_vehicle[0]
+        )["values"][1]
+        self.controller.open_movement_control(vehicle_id)
 
     def update_location(self, event=None):
         if not self.vehicle_table.tree.selection():
@@ -272,6 +288,10 @@ class CustomVehicleFrame(tk.Frame):
         actor_model = filter_carla_id_by_type("vehicle", selected_class, self.database.blueprint_lib)
         blueprint_id = actor_model[selected_model]
         selected_vehicle_id = self.vehicle_table.tree.item(selected_vehicle)["values"][1]
+        self.controller.close_movement_control_for_actor(
+            selected_vehicle_id,
+            "Selected vehicle is being replaced",
+        )
         self.controller.carla.change_actor_model(blueprint_id, self.database.actors_db.actors[selected_vehicle_id].id)
 
         try:
@@ -304,18 +324,8 @@ class CustomVehicleFrame(tk.Frame):
 
 
 
-    def _update_location_from_spawn_point(self, event):
-        spawn_point_num = int(str(self.selected_spawn_point.get()).split(":")[0])
-        available_spawn_points = self.database.world.get_map().get_spawn_points()
-        for i, spawn_point in enumerate(available_spawn_points):
-            if i == spawn_point_num:
-                transform = spawn_point
-                break
-            else:
-                transform = carla.Transform(carla.Location(x=0, y=0, z=0),carla.Rotation(pitch=0, roll=0, yaw=0))
-
+    def _set_spawn_transform_variables(self, transform):
         x, y, z, yaw, pitch, roll = return_data_from_transform(transform)
-
         self.x_position_var.set(x)
         self.y_position_var.set(y)
         self.z_position_var.set(z)
@@ -323,12 +333,35 @@ class CustomVehicleFrame(tk.Frame):
         self.pitch_position_var.set(pitch)
         self.roll_position_var.set(roll)
 
+    def _update_location_from_spawn_point(self, event=None):
+        selected_value = self.selected_spawn_point.get()
+        if not selected_value:
+            return
+        spawn_point_num = int(str(selected_value).split(":", 1)[0])
+        available_spawn_points = self.database.available_spawn_points
+        if not 0 <= spawn_point_num < len(available_spawn_points):
+            return
+
+        transform = available_spawn_points[spawn_point_num]
+        self._set_spawn_transform_variables(transform)
+
         if self.vehicle_preview:
             self.vehicle_preview.set_transform(transform)
 
     def update_spawn_point(self):
-        self.combobox_spawn_points["values"] = [f"{i}:{point}" for i, point in enumerate(self.database.available_spawn_points)]
+        self.available_spawn_points = [
+            f"{index}: {point}"
+            for index, point in enumerate(self.database.available_spawn_points)
+        ]
+        self.combobox_spawn_points["values"] = self.available_spawn_points
+        if not self.database.available_spawn_points:
+            self.selected_spawn_point.set("")
+            return
+
         self.combobox_spawn_points.current(0)
+        self._set_spawn_transform_variables(
+            self.database.available_spawn_points[0]
+        )
 
     def destroy_ghost(self):
         if self.vehicle_preview:
@@ -411,6 +444,10 @@ class CustomVehicleFrame(tk.Frame):
         selected_vehicle = self.vehicle_table.tree.selection()
         if selected_vehicle:
             vehicle_id = self.vehicle_table.tree.item(selected_vehicle)["values"][1]
+            self.controller.close_movement_control_for_actor(
+                vehicle_id,
+                "Selected vehicle removed",
+            )
             self.controller.carla.remove_actor(vehicle_id)
             self.vehicle_table.tree.delete(selected_vehicle)
 

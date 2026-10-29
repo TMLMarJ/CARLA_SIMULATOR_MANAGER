@@ -56,19 +56,9 @@ class CustomMainViewFrame(ttk.Frame):
         self.spectator_frame = SpectatorFrame(self.content_frame, self.controller)
         self.spectator_frame.grid(row=0, column=1, padx=5, pady=5, sticky="nw")
 
-        self.simulation_frame = SimulationControlFrame(self.content_frame, self.controller)
-        self.simulation_frame.grid(
-            row=1,
-            column=0,
-            columnspan=2,
-            padx=5,
-            pady=5,
-            sticky="new",
-        )
-
         self.dashboard_frame = SimulationDashboardFrame(self.content_frame)
         self.dashboard_frame.grid(
-            row=2,
+            row=1,
             column=0,
             columnspan=2,
             padx=5,

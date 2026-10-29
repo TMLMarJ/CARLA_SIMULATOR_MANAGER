@@ -5,6 +5,8 @@ import threading
 
 from simulation_manager import SimulationManager
 from simulation_dashboard import SimulationDashboardMonitor
+from vehicle_control import initial_vehicle_control_state
+from walker_control import initial_walker_ai_state
 
 class DataStorage:
     def __init__(self):
@@ -12,6 +14,9 @@ class DataStorage:
         self.sensors_db = actors.Sensors()
         self.lock = threading.Lock()
         self.sensor_event_queue = queue.Queue()
+        self.movement_event_queue = queue.Queue()
+        self.vehicle_control_states = {}
+        self.walker_ai_states = {}
         self.simulation_event_queue = queue.Queue()
         self.blueprint_lib = None
         self.world = None
@@ -53,6 +58,12 @@ class DataStorage:
 
     def add_actor(self, actor: carla.Actor, name: str):
         self.actors_db.add_actor(actor, name)
+        if actor.type_id.startswith("vehicle."):
+            self.vehicle_control_states[actor.id] = (
+                initial_vehicle_control_state()
+            )
+        elif actor.type_id.startswith("walker."):
+            self.walker_ai_states[actor.id] = initial_walker_ai_state()
 
     def add_sensor(self, sensor: carla.Sensor, parent_id: int, name: str,
                    blueprint_id: str, relative_transform: carla.Transform,
