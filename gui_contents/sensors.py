@@ -200,11 +200,16 @@ class CustomSensorFrame(tk.Frame):
                     status = "Active" if sensor_info.sensor.is_alive else "Inactive"
                 except RuntimeError:
                     status = "Inactive"
-                transform_text = (
-                    f"({transform.location.x:.2f}, {transform.location.y:.2f}, "
-                    f"{transform.location.z:.2f}) / ({transform.rotation.pitch:.2f}, "
-                    f"{transform.rotation.yaw:.2f}, {transform.rotation.roll:.2f})"
-                )
+                if transform is None:
+                    transform_text = "Unknown"
+                else:
+                    transform_text = (
+                        f"({transform.location.x:.2f}, {transform.location.y:.2f}, "
+                        f"{transform.location.z:.2f}) / "
+                        f"({transform.rotation.pitch:.2f}, "
+                        f"{transform.rotation.yaw:.2f}, "
+                        f"{transform.rotation.roll:.2f})"
+                    )
                 self.tree.insert("", "end", values=(
                     sensor_info.user_name,
                     sensor_info.carla_id,

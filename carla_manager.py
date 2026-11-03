@@ -11,7 +11,7 @@ import actors.actors as actors
 from datastore.datastore import DataStorage
 from carla_server import carla_server
 from tkinter import *
-from tkinter import ttk
+from tkinter import filedialog, ttk
 import utilities.functions as utils
 from PIL import Image, ImageTk
 import numpy as np
@@ -25,6 +25,7 @@ from gui_contents.StyleSettings import settings
 from gui_contents.main_gui_view import CustomMainViewFrame, SimulationControlFrame
 from spectator_preview import SpectatorPreviewManager
 from movement_control import MovementControlSessionManager
+from scenario_management.models import ActorOwnership
 
 from utilities.functions import parse_weather_to_dict, parse_weather_to_carla, wait_and_try, return_data_from_transform
 
@@ -55,6 +56,10 @@ class Manager(tk.Tk):
         self.closing = False
         self.disconnecting = False
         self.world_changing = False
+        self.scenario_saving = False
+        self.scenario_clearing = False
+        self.scenario_loading = False
+        self.scenario_load_plan = None
         self.spectator_preview = SpectatorPreviewManager()
         self.spectator_state = "Closed"
         self.spectator_camera_id = None
@@ -127,7 +132,16 @@ class Manager(tk.Tk):
                         print("Connected to CARLA")
 
                         self.main_view.initialize_connected_views()
-                        self.main_view.main_view.connection_frame.update_connection_state(True)
+                        self.main_view.main_view.connection_frame.update_connection_state(
+                            True
+                        )
+                        self.main_view.simulation_control_frame.scenario_frame.set_connected(
+                            True
+                        )
+                        if isinstance(data, dict):
+                            self.main_view.main_view.connection_frame.show_sync_result(
+                                data
+                            )
                         self.main_view.main_view.dashboard_frame.clear_context()
                         self.main_view.simulation_control_frame.set_connected(
                             True,
@@ -164,6 +178,10 @@ class Manager(tk.Tk):
         self.connected = False
         self.disconnecting = False
         self.world_changing = False
+        self.scenario_saving = False
+        self.scenario_clearing = False
+        self.scenario_loading = False
+        self.scenario_load_plan = None
         self.spectator_preview.request_stop()
         self.movement_control.handle_disconnect()
 
@@ -176,6 +194,9 @@ class Manager(tk.Tk):
         self.main_view.database = self.database
         self.main_view.actor_manager = actors.Actors()
         self.main_view.main_view.connection_frame.update_connection_state(False)
+        self.main_view.simulation_control_frame.scenario_frame.set_connected(
+            False
+        )
         self.main_view.main_view.dashboard_frame.show_context(
             "Error" if error else "Disconnected",
             error,
@@ -202,6 +223,9 @@ class Manager(tk.Tk):
         self.main_view.tabControl.select(self.main_view.main_tab)
         self.main_view.set_tabs_enabled(False)
         self.main_view.simulation_control_frame.set_connected(False)
+        self.main_view.simulation_control_frame.scenario_frame.set_connected(
+            False
+        )
         self.main_view.main_view.dashboard_frame.show_context("Disconnected")
         self.movement_control.request_close("CARLA disconnecting")
         self.close_spectator_preview()
@@ -214,6 +238,7 @@ class Manager(tk.Tk):
             or self.disconnecting
             or self.closing
             or self.world_changing
+            or self.scenario_loading
             or self.carla is None
         ):
             return
@@ -261,8 +286,343 @@ class Manager(tk.Tk):
             and not self.disconnecting
             and not self.closing
             and not self.world_changing
+            and not self.scenario_saving
+            and not self.scenario_clearing
+            and not self.scenario_loading
             and self.carla is not None
         )
+
+    def refresh_world(self):
+        if not self._simulation_control_available():
+            return
+        self.main_view.main_view.connection_frame.set_sync_pending()
+        self.carla.sync_world("manual")
+
+    def confirm_take_actor_ownership(self, runtime_id, type_id):
+        if not self._simulation_control_available():
+            return
+        confirmed = messagebox.askyesno(
+            "Take Ownership",
+            "Adopt this external actor into GUI management?\n\n"
+            f"Runtime ID: {runtime_id}\n"
+            f"Type: {type_id}\n\n"
+            "The actor will qualify for Scenario Save and Managed Clear. "
+            "Other CARLA clients can still control or delete it, and its "
+            "current external control state may be unknown.",
+        )
+        if not confirmed:
+            return
+        if self.carla.take_actor_ownership(runtime_id):
+            dashboard = self.main_view.main_view.dashboard_frame
+            dashboard.set_adoption_pending(True)
+            dashboard.adoption_status_var.set(
+                "Taking ownership..."
+            )
+
+    def save_scenario(self, name, path, file_format):
+        if not self._simulation_control_available():
+            return
+        accepted = self.carla.save_scenario(name, path, file_format)
+        if accepted:
+            self.scenario_saving = True
+            self.main_view.simulation_control_frame.scenario_frame.set_pending()
+
+    def prepare_clear_world(self, mode):
+        if not self._simulation_control_available():
+            return
+        accepted = self.carla.prepare_clear_world(mode)
+        if accepted:
+            self.scenario_clearing = True
+            self.main_view.simulation_control_frame.set_external_busy(True)
+            self.main_view.simulation_control_frame.scenario_frame.set_clear_pending()
+            self.main_view.main_view.dashboard_frame.show_context(
+                "Clear World preflight"
+            )
+
+    def load_scenario(self):
+        if not self._simulation_control_available():
+            return
+        path = filedialog.askopenfilename(
+            parent=self,
+            title="Load CARLA scenario",
+            filetypes=(
+                ("CARLA scenarios", "*.json *.yaml *.yml"),
+                ("JSON scenario", "*.json"),
+                ("YAML scenario", "*.yaml *.yml"),
+                ("All files", "*.*"),
+            ),
+        )
+        if not path:
+            return
+
+        accepted = self.carla.prepare_load_scenario(path)
+        if not accepted:
+            return
+        self.scenario_loading = True
+        self.scenario_load_plan = None
+        simulation_frame = self.main_view.simulation_control_frame
+        simulation_frame.set_external_busy(True)
+        simulation_frame.scenario_frame.set_load_pending()
+        self.main_view.main_view.dashboard_frame.show_context(
+            "Scenario Load preflight"
+        )
+
+    @staticmethod
+    def _load_preflight_message(plan):
+        actors = plan.get("actors") or []
+        sensor_count = sum(
+            1 for actor in actors
+            if str(actor.get("category", "")).lower() == "sensor"
+        )
+        metadata = plan.get("metadata") or {}
+        lines = [
+            f"Scenario: {metadata.get('name') or '-'}",
+            f"Scenario map: {plan.get('target_map') or '-'}",
+            f"Current map: {plan.get('current_map') or '-'}",
+            "Map change required: "
+            f"{'yes' if plan.get('map_change_required') else 'no'}",
+            f"Actors: {plan.get('actor_count', 0)}",
+            f"Sensors: {sensor_count}",
+            f"Skipped external: {plan.get('skipped_external', 0)}",
+            "Skipped infrastructure: "
+            f"{plan.get('skipped_infrastructure', 0)}",
+            f"Readiness: {plan.get('status', 'unknown')}",
+            "Clear policy: selective scenario replacement.",
+        ]
+        if plan.get("map_change_required"):
+            lines.append(
+                "Changing the map replaces the complete CARLA world, "
+                "including external static objects."
+            )
+        else:
+            lines.append(
+                "External static objects are preserved on the current map."
+            )
+        warnings = plan.get("warnings") or []
+        critical = plan.get("critical_problems") or []
+        unverified = plan.get("unverified_items") or []
+        if warnings:
+            lines.extend(["", "Warnings:"])
+            lines.extend(f"- {item}" for item in warnings)
+        if critical:
+            lines.extend(["", "Critical problems (Load is blocked):"])
+            lines.extend(f"- {item}" for item in critical)
+        if unverified:
+            lines.extend(["", "Unverified items:"])
+            lines.extend(f"- {item}" for item in unverified)
+        return "\n".join(lines)
+
+    @classmethod
+    def _load_confirmation_message(cls, plan):
+        lines = [
+            cls._load_preflight_message(plan),
+            "",
+            "This operation replaces the managed scenario configuration. "
+            "On the current map it removes all vehicles and pedestrians, "
+            "managed static objects, and dependent sensors/controllers.",
+            "There is no automatic rollback.",
+        ]
+        if plan.get("map_change_required"):
+            lines.extend([
+                "",
+                "MAP CHANGE WARNING: loading the target map itself removes "
+                "all actors from the current map.",
+            ])
+        else:
+            lines.append(
+                "External static objects are preserved on the current map."
+            )
+        lines.extend(["", "Continue with Scenario Load?"])
+        return "\n".join(lines)
+
+    def _handle_load_preflight(self, plan):
+        frame = self.main_view.simulation_control_frame.scenario_frame
+        self.scenario_load_plan = plan
+        frame.show_load_preflight(plan)
+        if plan.get("critical_problems"):
+            self._finish_load_gui()
+            frame.show_load_error("Preflight found critical problems.")
+            messagebox.showerror(
+                "Load Scenario preflight",
+                self._load_preflight_message(plan),
+            )
+            return
+
+        confirmed = messagebox.askyesno(
+            "Load Scenario — destructive operation",
+            self._load_confirmation_message(plan),
+        )
+        if not confirmed:
+            self._finish_load_gui()
+            frame.show_load_cancelled()
+            return
+
+        controller = self.carla
+        if (
+            controller is None
+            or not self.connected
+            or self.disconnecting
+            or self.closing
+        ):
+            self._finish_load_gui()
+            frame.show_load_error("The CARLA connection is no longer available.")
+            return
+        accepted = controller.execute_load_scenario(
+            plan.get("token"),
+            confirmed=True,
+        )
+        if accepted:
+            frame.set_load_pending("Loading scenario...")
+            self.main_view.main_view.dashboard_frame.show_context(
+                "Loading Scenario"
+            )
+        else:
+            self._finish_load_gui()
+            frame.show_load_error(
+                "The preflight plan is no longer valid. Run Load again."
+            )
+
+    def _finish_load_gui(self):
+        self.scenario_loading = False
+        self.scenario_load_plan = None
+        if self.connected and not self.disconnecting and not self.closing:
+            self.main_view.simulation_control_frame.set_external_busy(False)
+            self.main_view.main_view.connection_frame.update_connection_state(
+                True
+            )
+            self.main_view.main_view.dashboard_frame.clear_context()
+
+    @staticmethod
+    def _load_report_message(report):
+        lines = [
+            f"Status: {report.get('status', 'failed')}",
+            f"Scenario: {report.get('name') or '-'}",
+            f"Planned actors: {report.get('planned', 0)}",
+            f"Source actors omitted by scope: "
+            f"{report.get('scope_skipped', 0)}",
+            f"Restored: {report.get('restored', 0)}",
+            f"Skipped: {report.get('skipped', 0)}",
+            f"Failed: {report.get('failed', 0)}",
+            "Map changed: "
+            f"{'yes' if report.get('map_changed') else 'no'}",
+        ]
+        warnings = report.get("warnings") or []
+        if warnings:
+            lines.extend(["", "Warnings:"])
+            lines.extend(f"- {item}" for item in warnings)
+        errors = report.get("errors") or []
+        if errors:
+            lines.extend(["", "Errors:"])
+            for error in errors:
+                actor = error.get("scenario_id")
+                suffix = f" [{actor}]" if actor else ""
+                lines.append(
+                    f"- {error.get('stage', 'unknown')}{suffix}: "
+                    f"{error.get('message', 'Unknown error')}"
+                )
+        destructive_stages = {
+            "clear", "map_change", "post_map_validation", "world_settings",
+            "actor_spawn", "physics", "sensor_attachment", "control",
+            "synchronization",
+        }
+        if (
+            report.get("map_changed")
+            or report.get("clear_report")
+            or any(error.get("stage") in destructive_stages for error in errors)
+        ) and report.get("status") != "success":
+            lines.extend([
+                "",
+                "IMPORTANT: the previous world may already have been replaced; "
+                "automatic rollback is not available.",
+            ])
+        return "\n".join(lines)
+
+    @staticmethod
+    def _clear_preflight_message(plan):
+        mode = (
+            "Managed Actors Only"
+            if plan.get("mode") == "managed"
+            else "Entire World"
+        )
+        lines = [
+            f"Mode: {mode}",
+            f"World episode: {plan.get('world_id')}",
+            "",
+            f"Vehicles: {plan.get('vehicles', 0)}",
+            f"Pedestrians: {plan.get('pedestrians', 0)}",
+            f"Static objects: {plan.get('static_objects', 0)}",
+            f"Sensors: {plan.get('sensors', 0)}",
+            "Walker AI controllers: "
+            f"{plan.get('walker_ai_controllers', 0)}",
+            f"External actors affected: {plan.get('external_count', 0)}",
+            "Skipped infrastructure: "
+            f"{plan.get('skipped_infrastructure', 0)}",
+        ]
+        cascade_count = plan.get("cascade_external_count", 0)
+        if cascade_count:
+            lines.extend([
+                "",
+                f"Cascade warning: {cascade_count} external child actor(s) "
+                "may be removed together with their parent.",
+            ])
+        warnings = plan.get("warnings") or []
+        if warnings:
+            lines.extend(["", "Warnings:"])
+            lines.extend(f"- {warning}" for warning in warnings)
+        if plan.get("mode") == "entire_world":
+            lines.extend([
+                "",
+                "WARNING: This also removes qualifying actors created by "
+                "other CARLA clients.",
+            ])
+        lines.extend(["", "Continue with this exact preflight plan?"])
+        return "\n".join(lines)
+
+    def _handle_clear_preflight(self, plan):
+        frame = self.main_view.simulation_control_frame.scenario_frame
+        if plan.get("world_already_clear"):
+            self.scenario_clearing = False
+            self.main_view.simulation_control_frame.set_external_busy(False)
+            self.main_view.main_view.dashboard_frame.clear_context()
+            frame.show_clear_report({
+                "status": "success",
+                "planned_count": 0,
+                "removed": 0,
+                "already_missing": 0,
+                "failed": 0,
+            })
+            messagebox.showinfo("Clear World", "World already clear")
+            return
+
+        frame.show_clear_preflight(plan)
+        title = (
+            "Clear Entire World — destructive operation"
+            if plan.get("mode") == "entire_world"
+            else "Clear Managed Actors"
+        )
+        confirmed = messagebox.askyesno(
+            title,
+            self._clear_preflight_message(plan),
+        )
+        if confirmed:
+            self.movement_control.request_close("World is being cleared")
+            self.close_spectator_preview()
+            frame.set_clear_pending("Clearing approved actors...")
+        else:
+            frame.set_clear_pending("Cancelling Clear World...")
+        self.carla.execute_clear_world(
+            plan.get("token"),
+            confirmed=confirmed,
+        )
+
+    def _finish_clear_gui(self):
+        self.scenario_clearing = False
+        if self.connected and not self.disconnecting and not self.closing:
+            self.main_view.simulation_control_frame.set_external_busy(False)
+            self.main_view.main_view.connection_frame.update_connection_state(
+                True
+            )
+            self.main_view.main_view.dashboard_frame.clear_context()
 
     def check_simulation_events(self):
         self.simulation_check_job = None
@@ -304,6 +664,8 @@ class Manager(tk.Tk):
         except queue.Empty:
             pass
 
+        self._check_scenario_events()
+
         self._refresh_dashboard()
         self.movement_control.poll()
 
@@ -312,6 +674,251 @@ class Manager(tk.Tk):
                 100,
                 self.check_simulation_events,
             )
+
+    def _check_scenario_events(self):
+        try:
+            while True:
+                status, data = self.database.scenario_event_queue.get_nowait()
+                if status == "world_sync_completed":
+                    if self.connected and not self.disconnecting and not self.closing:
+                        self._refresh_actor_tables()
+                        self.main_view.main_view.connection_frame.show_sync_result(
+                            data
+                        )
+                elif status == "world_sync_error":
+                    if self.connected and not self.disconnecting and not self.closing:
+                        message = (
+                            data.get("message", "Unknown synchronization error")
+                            if isinstance(data, dict)
+                            else str(data)
+                        )
+                        self.main_view.main_view.connection_frame.show_sync_error(
+                            message
+                        )
+                elif status == "world_sync_operation_blocked":
+                    if self.connected and not self.disconnecting and not self.closing:
+                        messagebox.showinfo(
+                            "External actor",
+                            data.get("message", "The operation is unavailable."),
+                        )
+                elif status == "actor_ownership_result":
+                    if self.connected and not self.disconnecting and not self.closing:
+                        self._refresh_actor_tables()
+                        self._refresh_dashboard()
+                        dashboard = self.main_view.main_view.dashboard_frame
+                        dashboard.set_adoption_pending(False)
+                        dashboard.show_adoption_result(data)
+                        warnings = data.get("warnings") or []
+                        details = data.get("message", "")
+                        if warnings:
+                            details += "\n\nWarnings:\n" + "\n".join(
+                                f"- {warning}" for warning in warnings
+                            )
+                        if data.get("status") == "success":
+                            messagebox.showinfo("Take Ownership", details)
+                        elif data.get("status") == "already_managed":
+                            messagebox.showinfo("Take Ownership", details)
+                        else:
+                            messagebox.showwarning("Take Ownership", details)
+                elif status == "scenario_operation_blocked":
+                    if not self.closing:
+                        messagebox.showinfo(
+                            "Scenario operation",
+                            data.get(
+                                "message",
+                                "Another scenario operation is pending.",
+                            ),
+                        )
+                elif status == "scenario_save_completed":
+                    self.scenario_saving = False
+                    if self.connected and not self.disconnecting and not self.closing:
+                        self._refresh_actor_tables()
+                        self.main_view.simulation_control_frame.scenario_frame.show_result(
+                            data
+                        )
+                        messagebox.showinfo(
+                            "Scenario saved",
+                            f"Saved {data.get('saved', 0)} actors to:\n"
+                            f"{data.get('path', '')}\n\n"
+                            f"Partial: {data.get('partial', 0)}\n"
+                            "Skipped: "
+                            f"{sum(data.get(field, 0) for field in ('skipped_runtime_only', 'skipped_unrestorable', 'skipped_external', 'skipped_unsupported'))}",
+                        )
+                elif status == "scenario_save_error":
+                    self.scenario_saving = False
+                    if not self.closing:
+                        message = data.get("message", "Unknown save error")
+                        self.main_view.simulation_control_frame.scenario_frame.show_error(
+                            message
+                        )
+                        messagebox.showerror("Save Scenario", message)
+                elif status == "world_clear_preflight_ready":
+                    if self.connected and not self.disconnecting and not self.closing:
+                        self._handle_clear_preflight(data)
+                elif status == "world_clear_completed":
+                    self._finish_clear_gui()
+                    if not self.closing:
+                        frame = (
+                            self.main_view.simulation_control_frame.scenario_frame
+                        )
+                        frame.show_clear_report(data)
+                        if data.get("status") != "cancelled":
+                            self._refresh_actor_tables()
+                            title = (
+                                "Clear World completed"
+                                if data.get("status") == "success"
+                                else "Clear World result"
+                            )
+                            messagebox.showinfo(
+                                title,
+                                "Status: "
+                                f"{data.get('status', 'failed')}\n"
+                                f"Planned: {data.get('planned_count', 0)}\n"
+                                f"Removed: {data.get('removed', 0)}\n"
+                                "Already missing: "
+                                f"{data.get('already_missing', 0)}\n"
+                                f"Failed: {data.get('failed', 0)}",
+                            )
+                elif status == "world_clear_error":
+                    self._finish_clear_gui()
+                    if not self.closing:
+                        message = data.get(
+                            "message",
+                            "Unknown Clear World error",
+                        )
+                        self.main_view.simulation_control_frame.scenario_frame.show_clear_error(
+                            message
+                        )
+                        messagebox.showerror("Clear World", message)
+                elif status == "scenario_load_preflight_completed":
+                    if (
+                        self.scenario_loading
+                        and self.connected
+                        and not self.disconnecting
+                        and not self.closing
+                    ):
+                        self._handle_load_preflight(data)
+                elif status == "scenario_load_preflight_error":
+                    self._finish_load_gui()
+                    if not self.closing:
+                        message = data.get(
+                            "message",
+                            "Scenario Load preflight failed.",
+                        )
+                        frame = (
+                            self.main_view.simulation_control_frame.scenario_frame
+                        )
+                        frame.show_load_error(message)
+                        messagebox.showerror(
+                            "Load Scenario preflight",
+                            message,
+                        )
+                elif status == "scenario_load_plan_invalidated":
+                    if self.scenario_loading:
+                        self._finish_load_gui()
+                        if not self.closing:
+                            message = data.get(
+                                "reason",
+                                "The Scenario Load plan is no longer valid.",
+                            )
+                            frame = (
+                                self.main_view.simulation_control_frame.scenario_frame
+                            )
+                            frame.show_load_error(message)
+                elif status == "scenario_load_destructive_started":
+                    if self.connected and not self.disconnecting and not self.closing:
+                        self.movement_control.request_close("Scenario Load")
+                        if self.spectator_preview.request_stop():
+                            self.update_spectator_state("Stopping")
+                        self.main_view.main_view.dashboard_frame.show_context(
+                            "Loading Scenario"
+                        )
+                elif status == "scenario_load_completed":
+                    self._finish_load_gui()
+                    if not self.closing:
+                        frame = (
+                            self.main_view.simulation_control_frame.scenario_frame
+                        )
+                        frame.show_load_report(data)
+                        if (
+                            self.connected
+                            and not self.disconnecting
+                            and data.get("status") != "cancelled"
+                        ):
+                            self._refresh_after_scenario_load(data)
+                        message = self._load_report_message(data)
+                        status_value = data.get("status", "failed")
+                        if status_value == "success":
+                            messagebox.showinfo("Load Scenario completed", message)
+                        elif status_value == "partial_success":
+                            messagebox.showwarning(
+                                "Load Scenario partially completed",
+                                message,
+                            )
+                        elif status_value == "cancelled":
+                            messagebox.showinfo("Load Scenario cancelled", message)
+                        else:
+                            messagebox.showerror("Load Scenario failed", message)
+                elif status == "scenario_load_error":
+                    self._finish_load_gui()
+                    if not self.closing:
+                        message = data.get(
+                            "message",
+                            "Scenario Load failed.",
+                        )
+                        self.main_view.simulation_control_frame.scenario_frame.show_load_error(
+                            message
+                        )
+                        messagebox.showerror(
+                            "Load Scenario",
+                            message,
+                        )
+        except queue.Empty:
+            pass
+
+    def _refresh_actor_tables(self):
+        table_paths = (
+            (self.main_view.vehicle_frame, "vehicle_table"),
+            (self.main_view.actor_frame, "actor_table"),
+            (self.main_view.static_object_frame, "actor_table"),
+        )
+        for frame, table_name in table_paths:
+            if frame is not None:
+                getattr(frame, table_name).refresh_table()
+        if self.main_view.sensor_frame is not None:
+            self.main_view.sensor_frame.refresh_table()
+
+    def _refresh_after_scenario_load(self, report):
+        self._refresh_actor_tables()
+        world_frame = self.main_view.world_weather_frame
+        if world_frame is not None:
+            weather = self.database.actual_weather_data
+            for field in (
+                "cloudiness", "precipitation", "precipitation_deposits",
+                "wind_intensity", "sun_azimuth_angle", "sun_altitude_angle",
+                "fog_density", "fog_distance", "fog_falloff", "wetness",
+                "scattering_intensity", "mie_scattering_scale",
+                "rayleigh_scattering_scale", "dust_storm",
+            ):
+                if field in weather:
+                    getattr(world_frame, f"{field}_var").set(weather[field])
+            target_map = str(report.get("target_map") or "")
+            if target_map:
+                world_frame.selected_map.set(
+                    target_map.replace("\\", "/").rsplit("/", 1)[-1]
+                )
+                try:
+                    world_frame.update_image(None)
+                except (FileNotFoundError, OSError):
+                    pass
+        for actor_frame in (
+            self.main_view.vehicle_frame,
+            self.main_view.actor_frame,
+            self.main_view.static_object_frame,
+        ):
+            if actor_frame is not None:
+                actor_frame.update_spawn_point()
+        self._refresh_dashboard()
 
     def _refresh_dashboard(self):
         if self.main_view is None:
@@ -379,11 +986,23 @@ class Manager(tk.Tk):
             return
 
         with self.database.lock:
-            actor = self.database.actors_db.actors.get(int(actor_id))
+            actor_id = int(actor_id)
+            actor = self.database.actors_db.actors.get(actor_id)
+            actor_info = self.database.actors_db.actors_db.get(actor_id)
         if actor is None or not actor.is_alive:
             messagebox.showerror(
                 "Movement Control",
                 "The selected actor is no longer available.",
+            )
+            return
+        if (
+            actor_info is not None
+            and actor_info.ownership != ActorOwnership.MANAGED
+        ):
+            messagebox.showinfo(
+                "Movement Control",
+                "External actors are read-only until ownership takeover is "
+                "implemented.",
             )
             return
         if not actor.type_id.startswith(("vehicle.", "walker.")):
@@ -472,9 +1091,20 @@ class Manager(tk.Tk):
             )
 
     def begin_world_change(self):
-        if not self.connected or self.disconnecting or self.closing:
+        if (
+            not self.connected
+            or self.disconnecting
+            or self.closing
+            or self.scenario_saving
+            or self.scenario_clearing
+            or self.scenario_loading
+        ):
             return False
         self.world_changing = True
+        self.main_view.main_view.connection_frame.set_sync_pending()
+        self.main_view.simulation_control_frame.scenario_frame.set_connected(
+            False
+        )
         self.movement_control.request_close("World is changing")
         self.carla.stop_simulation_control()
         self.main_view.simulation_control_frame.set_external_busy(True)
@@ -487,6 +1117,10 @@ class Manager(tk.Tk):
 
     def finish_world_change(self):
         self.world_changing = False
+        self.main_view.main_view.connection_frame.update_connection_state(True)
+        self.main_view.simulation_control_frame.scenario_frame.set_connected(
+            True
+        )
         self.main_view.simulation_control_frame.set_external_busy(False)
         self.main_view.main_view.dashboard_frame.clear_context()
         if self.connected and not self.spectator_preview.is_active():

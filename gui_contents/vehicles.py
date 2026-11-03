@@ -652,12 +652,22 @@ class VehicleTable(ttk.Frame):
     def initialize_data(self):
         for actor_id, actor_info in self.database.actors_db.actors_db.items():
             if "vehicle" in actor_info.type_id:
+                location = actor_info.location
+                transform = actor_info.transform
                 vehicle_info = {
                     "name": actor_info.user_name,
                     "carla_id": actor_info.carla_id,
                     "type_id": actor_info.type_id,
-                    "location": f"({actor_info.location.x:.2f}, {actor_info.location.y:.2f}, {actor_info.location.z:.2f})",
-                    "rotation": f"({actor_info.transform.rotation.pitch:.2f}, {actor_info.transform.rotation.yaw:.2f}, {actor_info.transform.rotation.roll:.2f})",
+                    "location": (
+                        f"({location.x:.2f}, {location.y:.2f}, {location.z:.2f})"
+                        if location is not None else "Unknown"
+                    ),
+                    "rotation": (
+                        f"({transform.rotation.pitch:.2f}, "
+                        f"{transform.rotation.yaw:.2f}, "
+                        f"{transform.rotation.roll:.2f})"
+                        if transform is not None else "Unknown"
+                    ),
                     "sensors": "",  # TODO: Implement sensor information retrieval when the sensor management is implemented
                     "is_active": ("Active" if actor_info.is_alive else "Inactive")
                 }

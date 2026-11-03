@@ -5,8 +5,12 @@ import threading
 
 from simulation_manager import SimulationManager
 from simulation_dashboard import SimulationDashboardMonitor
-from vehicle_control import initial_vehicle_control_state
+from vehicle_control import (
+    initial_vehicle_control_state,
+    unknown_vehicle_control_state,
+)
 from walker_control import initial_walker_ai_state
+from scenario_management.models import ActorOwnership
 
 class DataStorage:
     def __init__(self):
@@ -18,6 +22,7 @@ class DataStorage:
         self.vehicle_control_states = {}
         self.walker_ai_states = {}
         self.simulation_event_queue = queue.Queue()
+        self.scenario_event_queue = queue.Queue()
         self.blueprint_lib = None
         self.pedestrian_blueprint_ids = []
         self.world = None
@@ -58,26 +63,78 @@ class DataStorage:
             SimulationDashboardMonitor.empty_application_status()
         )
 
-    def add_actor(self, actor: carla.Actor, name: str):
-        self.actors_db.add_actor(actor, name)
-        if actor.type_id.startswith("vehicle."):
+    def add_actor(self, actor: carla.Actor, name: str, **metadata):
+        actor_info = self.actors_db.add_actor(actor, name, **metadata)
+        if (
+            actor_info.ownership == ActorOwnership.MANAGED
+            and actor.type_id.startswith("vehicle.")
+        ):
             self.vehicle_control_states[actor.id] = (
                 initial_vehicle_control_state()
             )
-        elif actor.type_id.startswith("walker."):
+        elif (
+            actor_info.ownership == ActorOwnership.MANAGED
+            and actor.type_id.startswith("walker.")
+        ):
             self.walker_ai_states[actor.id] = initial_walker_ai_state()
+        return actor_info
 
     def add_sensor(self, sensor: carla.Sensor, parent_id: int, name: str,
                    blueprint_id: str, relative_transform: carla.Transform,
-                   attributes: dict):
-        self.sensors_db.add_sensor(
+                   attributes: dict, **metadata):
+        return self.sensors_db.add_sensor(
             sensor,
             parent_id,
             name,
             blueprint_id,
             relative_transform,
-            attributes
+            attributes,
+            **metadata,
         )
+
+    def is_actor_managed(self, actor_id):
+        actor_info = self.actors_db.actors_db.get(int(actor_id))
+        return (
+            actor_info is not None
+            and actor_info.ownership == ActorOwnership.MANAGED
+        )
+
+    def is_sensor_managed(self, sensor_id):
+        sensor_info = self.sensors_db.sensors_db.get(int(sensor_id))
+        return (
+            sensor_info is not None
+            and sensor_info.ownership == ActorOwnership.MANAGED
+        )
+
+    def adopt_runtime_actor(self, actor_id, actor, category, origin):
+        """Update the existing synchronized record without replacing actor."""
+        actor_id = int(actor_id)
+        if category == "sensor":
+            info = self.sensors_db.sensors_db[actor_id]
+            info.update_runtime(actor, preserve_relative=True)
+        else:
+            info = self.actors_db.actors_db[actor_id]
+            info.update_runtime(actor)
+        info.ownership = ActorOwnership.MANAGED
+        info.origin = origin
+        info.data_sources["ownership"] = "gui"
+        info.data_sources["adoption"] = "server"
+
+        if category == "vehicle":
+            self.vehicle_control_states[actor_id] = (
+                unknown_vehicle_control_state()
+            )
+        elif category == "pedestrian":
+            state = initial_walker_ai_state()
+            state.update({
+                "mode": "Unknown",
+                "status": (
+                    "Control state is unknown for an adopted external actor."
+                ),
+                "state_source": "unknown",
+            })
+            self.walker_ai_states[actor_id] = state
+        return info
 
     def data_ready(self):
         return (

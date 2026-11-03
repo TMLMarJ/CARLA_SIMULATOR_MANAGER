@@ -5,6 +5,26 @@ import time
 from utilities.functions import *
 from simulation_dashboard import SimulationDashboardMonitor
 from simulation_manager import SimulationManager
+from scenario_management.scenario_manager import ScenarioManager
+from scenario_management.actor_adoption import (
+    ActorAdopter,
+    ActorAdoptionReport,
+    AdoptionStatus,
+)
+from scenario_management.path_utils import (
+    ScenarioPathError,
+    normalize_scenario_path,
+)
+from scenario_management.models import ActorCategory
+from scenario_management.scenario_restorer import ScenarioLoadReport
+from scenario_management.world_synchronizer import WorldSynchronizer
+from scenario_management.converters import WEATHER_FIELDS
+from scenario_management.world_cleaner import (
+    ClearMode,
+    StaleClearPlanError,
+    WorldCleaner,
+    WorldClearReport,
+)
 from movement_preview import camera_transform_for_actor
 from vehicle_control import (
     AUTOPILOT,
@@ -60,6 +80,17 @@ class CarlaController:
         self.walker_ai_runtime = {}
         self.simulation_manager = SimulationManager()
         self.dashboard_monitor = SimulationDashboardMonitor()
+        self.world_synchronizer = WorldSynchronizer()
+        self.actor_adopter = ActorAdopter()
+        self.world_cleaner = WorldCleaner()
+        self.scenario_manager = ScenarioManager(self.world_cleaner)
+        self.scenario_operation_lock = threading.Lock()
+        self.scenario_operation_pending = False
+        self.scenario_operation_kind = None
+        self.active_clear_plan = None
+        self.active_load_plan = None
+        self.load_execution_queued = False
+        self.clear_execution_queued = False
         self._next_snapshot_check = 0.0
 
     def start(self):
@@ -144,6 +175,15 @@ class CarlaController:
             self._shutdown_vehicle_controls(disable_autopilot=True)
             self._shutdown_walker_ai()
             self.cleanup_movement_preview("controller_error")
+            with self.scenario_operation_lock:
+                self.active_load_plan = None
+                if self.scenario_operation_kind in (
+                    "load_preflight",
+                    "load",
+                ):
+                    self.scenario_operation_pending = False
+                    self.scenario_operation_kind = None
+                    self.load_execution_queued = False
             self.running = False
             self.data_ready = False
             self.simulation_manager.disconnect()
@@ -193,8 +233,12 @@ class CarlaController:
                 world,
                 "Initial connection",
             )
-            self._service_dashboard(world, force=True)
-            self.connection_queue.put(("connected", None))
+            sync_report = self._perform_world_sync(
+                world,
+                reason="initial_connection",
+                publish=False,
+            )
+            self.connection_queue.put(("connected", sync_report))
 
         except Exception as e:
             self.data_ready = False
@@ -359,6 +403,20 @@ class CarlaController:
                         self.database,
                         new_world,
                     )
+                    try:
+                        self._perform_world_sync(
+                            new_world,
+                            reason="map_changed",
+                        )
+                    except Exception as sync_error:
+                        self.dashboard_monitor.record_error(sync_error)
+                        self.database.scenario_event_queue.put((
+                            "world_sync_error",
+                            {
+                                "message": str(sync_error),
+                                "reason": "map_changed",
+                            },
+                        ))
                     self.database.simulation_event_queue.put((
                         "simulation_settings_loaded",
                         new_simulation_settings,
@@ -478,6 +536,336 @@ class CarlaController:
             if cmd == "stop_simulation_control":
                 self.simulation_manager.stop_local_ticks()
                 self._publish_simulation_control_state(force=True)
+
+            if cmd == "sync_world":
+                try:
+                    self._perform_world_sync(
+                        world,
+                        reason=(data or "manual"),
+                    )
+                except Exception as error:
+                    self.dashboard_monitor.record_error(error)
+                    self.database.scenario_event_queue.put((
+                        "world_sync_error",
+                        {"message": str(error), "reason": data or "manual"},
+                    ))
+
+            if cmd == "take_actor_ownership":
+                try:
+                    report = self.actor_adopter.adopt(
+                        world,
+                        self.database,
+                        data["expected_identity"],
+                        self._collect_internal_actor_ids(),
+                    )
+                    if report.status in (
+                        AdoptionStatus.ACTOR_MISSING,
+                        AdoptionStatus.STALE_IDENTITY,
+                    ):
+                        try:
+                            self._perform_world_sync(
+                                world,
+                                reason="ownership_adoption_stale",
+                                publish=False,
+                            )
+                        except Exception as sync_error:
+                            report.warnings.append(
+                                f"World refresh failed: {sync_error}"
+                            )
+                    elif report.success:
+                        try:
+                            sync_report = self._perform_world_sync(
+                                world,
+                                reason="ownership_adoption",
+                                publish=False,
+                            )
+                            report.warnings.extend(
+                                error["message"]
+                                for error in sync_report.get("errors", ())
+                            )
+                        except Exception as sync_error:
+                            report.warnings.append(
+                                f"World refresh failed: {sync_error}"
+                            )
+                except Exception as error:
+                    self.dashboard_monitor.record_error(error)
+                    report = ActorAdoptionReport(
+                        status=AdoptionStatus.ERROR,
+                        runtime_id=int(data["runtime_id"]),
+                        message=str(error),
+                    )
+                finally:
+                    with self.scenario_operation_lock:
+                        if self.scenario_operation_kind == "adoption":
+                            self.scenario_operation_pending = False
+                            self.scenario_operation_kind = None
+                self.database.scenario_event_queue.put((
+                    "actor_ownership_result",
+                    report.to_dict(),
+                ))
+
+            if cmd == "prepare_load_scenario":
+                try:
+                    if self.shutdown_event.is_set():
+                        raise RuntimeError(
+                            "Load preflight cancelled during disconnect."
+                        )
+                    server_version = None
+                    try:
+                        server_version = self.client.get_server_version()
+                    except Exception:
+                        pass
+                    available_maps = None
+                    try:
+                        available_maps = self.client.get_available_maps()
+                    except Exception:
+                        pass
+                    plan = self.scenario_manager.prepare_load(
+                        data["path"],
+                        world,
+                        available_maps,
+                        blueprint_library,
+                        server_version=server_version,
+                    )
+                    with self.scenario_operation_lock:
+                        self.active_load_plan = plan
+                    self.database.scenario_event_queue.put((
+                        "scenario_load_preflight_completed",
+                        plan.to_dict(),
+                    ))
+                except Exception as error:
+                    self.dashboard_monitor.record_error(error)
+                    with self.scenario_operation_lock:
+                        self.active_load_plan = None
+                    self.database.scenario_event_queue.put((
+                        "scenario_load_preflight_error",
+                        {
+                            "message": str(error),
+                            "path": data.get("path"),
+                        },
+                    ))
+                finally:
+                    with self.scenario_operation_lock:
+                        self.scenario_operation_pending = False
+                        self.scenario_operation_kind = None
+
+            if cmd == "execute_load_scenario":
+                plan = None
+                try:
+                    with self.scenario_operation_lock:
+                        plan = self.active_load_plan
+                    if plan is None or plan.token != data.get("token"):
+                        raise RuntimeError(
+                            "The Scenario Load plan is no longer valid. Run "
+                            "preflight again."
+                        )
+                    available_maps = None
+                    server_version = None
+                    try:
+                        available_maps = self.client.get_available_maps()
+                    except Exception:
+                        pass
+                    try:
+                        server_version = self.client.get_server_version()
+                    except Exception:
+                        pass
+                    result = self.scenario_manager.execute_load(
+                        plan,
+                        bool(data.get("confirmed", False)),
+                        world,
+                        self.database,
+                        blueprint_library,
+                        available_maps,
+                        server_version,
+                        self._collect_internal_actor_ids,
+                        self._prepare_load_clear_lifecycle,
+                        self._replace_world_for_load,
+                        self._apply_scenario_world_settings,
+                        self._restore_scenario_control,
+                        lambda active_world: self._perform_world_sync(
+                            active_world,
+                            reason="after_load_scenario",
+                            publish=False,
+                        ),
+                    )
+                    world = result.world
+                    blueprint_library = result.blueprint_library
+                    self.database.scenario_event_queue.put((
+                        "scenario_load_completed",
+                        result.report.to_dict(),
+                    ))
+                except Exception as error:
+                    self.dashboard_monitor.record_error(error)
+                    failed = ScenarioLoadReport(
+                        name=(
+                            str(plan.metadata.get("name", ""))
+                            if plan is not None else ""
+                        ),
+                        source_path=(plan.source_path if plan is not None else ""),
+                        source_map=(plan.current_map if plan is not None else ""),
+                        target_map=(plan.target_map if plan is not None else ""),
+                        map_changed=False,
+                        planned=(plan.actor_count if plan is not None else 0),
+                    )
+                    failed.add_error("preflight", error)
+                    self.database.scenario_event_queue.put((
+                        "scenario_load_completed",
+                        failed.to_dict(),
+                    ))
+                finally:
+                    self._finish_load_operation()
+
+            if cmd == "save_scenario":
+                try:
+                    if self.shutdown_event.is_set():
+                        raise RuntimeError(
+                            "Scenario save cancelled during disconnect."
+                        )
+                    result = self.scenario_manager.save(
+                        world,
+                        self.database,
+                        self._collect_internal_actor_ids(),
+                        data["name"],
+                        data["path"],
+                        data["format"],
+                        synchronize=self._perform_world_sync,
+                        cancel_check=self.shutdown_event.is_set,
+                    )
+                    self.database.scenario_event_queue.put((
+                        "scenario_save_completed",
+                        result,
+                    ))
+                except Exception as error:
+                    self.dashboard_monitor.record_error(error)
+                    self.database.scenario_event_queue.put((
+                        "scenario_save_error",
+                        {
+                            "message": str(error),
+                            "path": data.get("path"),
+                        },
+                    ))
+                finally:
+                    with self.scenario_operation_lock:
+                        self.scenario_operation_pending = False
+                        self.scenario_operation_kind = None
+
+            if cmd == "prepare_clear_world":
+                try:
+                    if self.shutdown_event.is_set():
+                        raise RuntimeError(
+                            "Clear World preflight cancelled during disconnect."
+                        )
+                    plan = self.world_cleaner.prepare_plan(
+                        world,
+                        self.database,
+                        data,
+                        self._collect_internal_actor_ids(),
+                    )
+                    with self.scenario_operation_lock:
+                        self.active_clear_plan = (
+                            plan if plan.planned_count else None
+                        )
+                        self.clear_execution_queued = False
+                        if not plan.planned_count:
+                            self.scenario_operation_pending = False
+                            self.scenario_operation_kind = None
+                    self.database.scenario_event_queue.put((
+                        "world_clear_preflight_ready",
+                        plan.to_dict(),
+                    ))
+                except Exception as error:
+                    self.dashboard_monitor.record_error(error)
+                    self._finish_clear_operation()
+                    self.database.scenario_event_queue.put((
+                        "world_clear_error",
+                        {"message": str(error), "phase": "preflight"},
+                    ))
+
+            if cmd == "execute_clear_world":
+                plan = None
+                try:
+                    with self.scenario_operation_lock:
+                        plan = self.active_clear_plan
+                    if plan is None or plan.token != data.get("token"):
+                        raise StaleClearPlanError(
+                            "The Clear World plan is no longer valid. Run "
+                            "preflight again."
+                        )
+                    if not data.get("confirmed", False):
+                        report = WorldClearReport.cancelled(
+                            plan.mode,
+                            plan.planned_count,
+                            "Clear World was cancelled by the user.",
+                        )
+                    else:
+                        self.world_cleaner.validate_plan(
+                            world,
+                            plan,
+                            self._collect_internal_actor_ids(),
+                        )
+                        self._prepare_clear_lifecycle(plan)
+                        report = self.world_cleaner.execute_plan(
+                            world,
+                            plan,
+                            self._collect_internal_actor_ids(),
+                        )
+                        try:
+                            report.sync_report = self._perform_world_sync(
+                                world,
+                                reason="after_clear_world",
+                                publish=False,
+                            )
+                        except Exception as sync_error:
+                            report.warnings.append(
+                                f"Final world synchronization failed: "
+                                f"{sync_error}"
+                            )
+                            report.errors.append({
+                                "runtime_id": None,
+                                "message": str(sync_error),
+                            })
+                            if report.status == "success":
+                                report.status = "partial_success"
+                        self.database.sensor_event_queue.put((
+                            "sensors_cleared",
+                            None,
+                        ))
+                    self.database.scenario_event_queue.put((
+                        "world_clear_completed",
+                        report.to_dict(),
+                    ))
+                except Exception as error:
+                    self.dashboard_monitor.record_error(error)
+                    sync_report = {}
+                    try:
+                        sync_report = self._perform_world_sync(
+                            world,
+                            reason="clear_world_aborted",
+                            publish=False,
+                        )
+                    except Exception:
+                        pass
+                    failed_report = WorldClearReport(
+                        mode=(plan.mode if plan is not None else data.get("mode", "unknown")),
+                        planned_count=(
+                            plan.planned_count if plan is not None else 0
+                        ),
+                        failed=(
+                            plan.planned_count if plan is not None else 0
+                        ),
+                        errors=[{
+                            "runtime_id": None,
+                            "message": str(error),
+                        }],
+                        sync_report=sync_report,
+                        status="failed",
+                    )
+                    self.database.scenario_event_queue.put((
+                        "world_clear_completed",
+                        failed_report.to_dict(),
+                    ))
+                finally:
+                    self._finish_clear_operation()
 
             if cmd == "spawn_preview_actor":
                 # A preview can be requested more than once by GUI events. Always
@@ -660,6 +1048,18 @@ class CarlaController:
 
                     transform = old_actor.get_transform()
                     name = actor_info.user_name
+                    preserved_metadata = {
+                        "scenario_id": actor_info.scenario_id,
+                        "ownership": actor_info.ownership,
+                        "origin": actor_info.origin,
+                        "configuration_status": (
+                            actor_info.configuration_status
+                        ),
+                        "missing_fields": list(actor_info.missing_fields),
+                        "warnings": list(actor_info.warnings),
+                        "parent_scenario_id": actor_info.parent_scenario_id,
+                        "data_sources": dict(actor_info.data_sources),
+                    }
                     physics = (
                         old_actor.get_physics_control()
                         if old_actor.type_id.startswith("vehicle.")
@@ -696,7 +1096,11 @@ class CarlaController:
                     if physics is not None:
                         new_actor.apply_physics_control(physics)
                     with self.database.lock:
-                        self.database.add_actor(new_actor, name)
+                        self.database.add_actor(
+                            new_actor,
+                            name,
+                            **preserved_metadata,
+                        )
                         self.database.spawned_actor_id = new_actor.id
                     self._record_actor_operation_result(
                         "change_model",
@@ -999,6 +1403,7 @@ class CarlaController:
             return None
 
     def _service_dashboard(self, world, world_snapshot=None, force=False):
+        self._invalidate_load_plan_if_episode_changed(world)
         if self.movement_preview_camera is not None:
             try:
                 parent = self.movement_preview_camera.parent
@@ -1011,39 +1416,22 @@ class CarlaController:
             except Exception:
                 self.cleanup_movement_preview("camera_unavailable")
 
-        internal_actor_ids = set()
+        internal_actor_ids = self._collect_internal_actor_ids()
         streaming_sensor_ids = set(self.sensor_preview_ids)
 
-        for actor in (self.database.ghost_data, self.database.ghost_camera):
-            actor_id = self._actor_id(actor)
-            if actor_id is not None:
-                internal_actor_ids.add(actor_id)
         ghost_camera_id = self._actor_id(self.database.ghost_camera)
         if ghost_camera_id is not None:
             streaming_sensor_ids.add(ghost_camera_id)
 
         spectator_camera_id = getattr(
-            self.controller,
-            "spectator_camera_id",
-            None,
+            self.controller, "spectator_camera_id", None
         )
         if spectator_camera_id is not None:
-            internal_actor_ids.add(spectator_camera_id)
             streaming_sensor_ids.add(spectator_camera_id)
 
         movement_camera_id = self._actor_id(self.movement_preview_camera)
         if movement_camera_id is not None:
-            internal_actor_ids.add(movement_camera_id)
             streaming_sensor_ids.add(movement_camera_id)
-
-        for walker_controller in getattr(
-            self,
-            "walker_ai_controllers",
-            {},
-        ).values():
-            controller_id = self._actor_id(walker_controller)
-            if controller_id is not None:
-                internal_actor_ids.add(controller_id)
 
         viewer_status = getattr(self.controller, "spectator_state", "Unknown")
         self.dashboard_monitor.update(
@@ -1058,6 +1446,321 @@ class CarlaController:
             world_snapshot=world_snapshot,
             force=force,
         )
+
+    def _collect_internal_actor_ids(self):
+        internal_actor_ids = set()
+        for actor in (
+            self.database.ghost_data,
+            self.database.ghost_camera,
+            self.movement_preview_camera,
+        ):
+            actor_id = self._actor_id(actor)
+            if actor_id is not None:
+                internal_actor_ids.add(actor_id)
+
+        spectator_camera_id = getattr(
+            self.controller,
+            "spectator_camera_id",
+            None,
+        )
+        if spectator_camera_id is not None:
+            try:
+                internal_actor_ids.add(int(spectator_camera_id))
+            except (TypeError, ValueError):
+                pass
+
+        for walker_controller in self.walker_ai_controllers.values():
+            controller_id = self._actor_id(walker_controller)
+            if controller_id is not None:
+                internal_actor_ids.add(controller_id)
+        return internal_actor_ids
+
+    def _perform_world_sync(self, world, reason, publish=True):
+        report = self.world_synchronizer.synchronize(
+            world,
+            self.database,
+            self._collect_internal_actor_ids(),
+            reason=reason,
+        )
+        if self.movement_preview_actor_id in report.removed_actor_ids:
+            self.cleanup_movement_preview("actor_removed_externally")
+        for sensor_id in report.removed_sensor_ids:
+            self.stop_sensor_preview_actor(sensor_id)
+        self._service_dashboard(world, force=True)
+        report_data = report.to_dict()
+        if publish:
+            self.database.scenario_event_queue.put((
+                "world_sync_completed",
+                report_data,
+            ))
+        return report_data
+
+    def _replace_world_for_load(self, target_map):
+        self.database.scenario_event_queue.put((
+            "scenario_load_destructive_started",
+            {"target_map": str(target_map), "map_change": True},
+        ))
+        self._shutdown_vehicle_controls(disable_autopilot=True)
+        self._shutdown_walker_ai()
+        self.cleanup_movement_preview("scenario_load")
+        self.cleanup_sensor_previews()
+        self.cleanup_preview()
+        self.simulation_manager.stop_local_ticks()
+        self._publish_simulation_control_state(force=True)
+        map_name = self.scenario_manager.loader.map_key(target_map)
+        self.client.set_timeout(30.0)
+        new_world = None
+        new_library = None
+        try:
+            new_world = self.client.load_world(map_name)
+            if new_world is None or not self.scenario_manager.loader.maps_equal(
+                target_map,
+                new_world.get_map().name,
+            ):
+                raise RuntimeError(
+                    f"CARLA did not load target map '{target_map}'."
+                )
+            new_library = new_world.get_blueprint_library()
+            settings = self.simulation_manager.get_current_settings(new_world)
+            self.simulation_manager.settings_changed(
+                settings,
+                preserve_activity=False,
+            )
+            weather_data = parse_weather_to_dict(new_world.get_weather())
+            available_maps = self.client.get_available_maps()
+            try:
+                server_version = self.client.get_server_version()
+            except Exception:
+                server_version = None
+            with self.database.lock:
+                self.database.actors_db.clear()
+                self.database.sensors_db.clear()
+                self.database.vehicle_control_states.clear()
+                self.database.walker_ai_states.clear()
+                self.database.spawned_actor_id = None
+                self.database.world = new_world
+                self.database.blueprint_lib = new_library
+                self.database.pedestrian_blueprint_ids = (
+                    get_pedestrian_blueprint_ids(new_library)
+                )
+                self.database.world_lib = available_maps
+                self.database.actual_weather_data = weather_data
+                self.database.available_spawn_points = (
+                    new_world.get_map().get_spawn_points()
+                )
+                self.database.actual_simulation_settings = settings
+                self.database.proposed_simulation_settings = settings.copy()
+            self.sensor_status_errors.clear()
+            self.database.sensor_event_queue.put(("sensors_cleared", None))
+            self.dashboard_monitor.reset_world(
+                self.database,
+                new_world,
+                "Scenario Load map change",
+            )
+            return (
+                new_world,
+                new_library,
+                available_maps,
+                server_version,
+            )
+        except Exception as error:
+            if new_world is not None:
+                error.changed_world = new_world
+                error.blueprint_library = new_library
+            raise
+        finally:
+            self.client.set_timeout(5.0)
+
+    def _apply_scenario_world_settings(self, world, world_data):
+        self.simulation_manager.stop_local_ticks()
+        confirmed = self.simulation_manager.apply_settings(
+            world,
+            dict(world_data["simulation"]),
+        )
+        self.simulation_manager.settings_changed(
+            confirmed,
+            preserve_activity=False,
+        )
+        weather = world.get_weather()
+        for field in WEATHER_FIELDS:
+            setattr(weather, field, float(world_data["weather"][field]))
+        world.set_weather(weather)
+        self._update_traffic_manager_sync(world)
+        with self.database.lock:
+            self.database.actual_simulation_settings = confirmed
+            self.database.proposed_simulation_settings = confirmed.copy()
+            self.database.actual_weather_data = parse_weather_to_dict(weather)
+        self.database.simulation_event_queue.put((
+            "simulation_settings_loaded",
+            confirmed,
+        ))
+        self._publish_simulation_control_state(force=True)
+
+    def _restore_scenario_control(self, world, actor, data, parent):
+        warnings = []
+        category = data["category"]
+        control = data.get("control") or {}
+        if category == ActorCategory.VEHICLE:
+            mode = control.get("mode")
+            actor_id = int(actor.id)
+            if mode == AUTOPILOT and control.get("autopilot_enabled") is True:
+                port = control.get("traffic_manager_port")
+                if port != self.TRAFFIC_MANAGER_PORT:
+                    warnings.append(
+                        "Autopilot was not enabled because its Traffic "
+                        "Manager port is unsupported by the current controller."
+                    )
+                else:
+                    self._ensure_traffic_manager(world)
+                    actor.set_autopilot(True, port)
+                    with self.database.lock:
+                        self.database.vehicle_control_states[actor_id].update({
+                            "mode": AUTOPILOT,
+                            "status": f"Autopilot active (port {port}).",
+                            "autopilot_enabled": True,
+                            "autopilot_state_source": "file",
+                            "traffic_manager_port": port,
+                        })
+            elif mode == MANUAL_CONTROL:
+                with self.database.lock:
+                    self.database.vehicle_control_states[actor_id].update({
+                        "mode": MANUAL_CONTROL,
+                        "status": (
+                            "Manual Control restored; open Movement Control "
+                            "to provide input."
+                        ),
+                        "autopilot_enabled": False,
+                        "autopilot_state_source": "file",
+                        "traffic_manager_port": None,
+                        "input_fresh": False,
+                    })
+            elif mode not in (NO_CONTROL, None):
+                warnings.append(
+                    f"Unknown vehicle control mode '{mode}' was not restored."
+                )
+        elif category == ActorCategory.PEDESTRIAN:
+            actor_id = int(actor.id)
+            with self.database.lock:
+                state = self.database.walker_ai_states[actor_id]
+                speed = control.get("speed")
+                if isinstance(speed, (int, float)) and not isinstance(speed, bool):
+                    state["speed"] = float(speed)
+                if isinstance(control.get("random_navigation"), bool):
+                    state["random_navigation"] = control["random_navigation"]
+                state["active"] = False
+                state["mode"] = WALKER_AI_STOPPED
+                state["status"] = "Walker control restored in stopped state."
+            if control.get("active") is True:
+                warnings.append(
+                    "Pedestrian AI was not started because no explicit target "
+                    "is stored on the pedestrian record."
+                )
+        elif category == ActorCategory.WALKER_AI_CONTROLLER:
+            if parent is None:
+                raise RuntimeError("Walker AI controller parent is unavailable.")
+            target = control["target"]
+            speed = float(control["max_speed"])
+            try:
+                actor.start()
+                actor.go_to_location(carla.Location(
+                    x=float(target["x"]),
+                    y=float(target["y"]),
+                    z=float(target["z"]),
+                ))
+                actor.set_max_speed(speed)
+            except Exception:
+                try:
+                    actor.stop()
+                except Exception:
+                    pass
+                raise
+            self.walker_ai_controllers[int(parent.id)] = actor
+            with self.database.lock:
+                state = self.database.walker_ai_states[int(parent.id)]
+                state.update({
+                    "mode": WALKER_AI_RUNNING,
+                    "active": True,
+                    "speed": speed,
+                    "controller_id": int(actor.id),
+                    "target": dict(target),
+                    "random_navigation": False,
+                    "status": "Walker AI controller restored from scenario.",
+                    "error": None,
+                })
+        return warnings
+
+    def _prepare_clear_lifecycle(self, plan):
+        target_ids = {item.runtime_id for item in plan.items}
+        self.cleanup_movement_preview("clear_world")
+        self.cleanup_sensor_previews()
+        self.cleanup_preview()
+
+        for item in plan.items:
+            if item.category == ActorCategory.SENSOR:
+                self.stop_sensor_preview_actor(item.runtime_id)
+            elif item.category == ActorCategory.WALKER_AI_CONTROLLER:
+                continue
+            elif item.category == ActorCategory.PEDESTRIAN:
+                self._destroy_walker_ai(
+                    item.runtime_id,
+                    remove_state=True,
+                )
+            elif item.category == ActorCategory.VEHICLE:
+                self._release_vehicle_control(
+                    item.runtime_id,
+                    disable_autopilot=True,
+                )
+
+        with self.database.lock:
+            for actor_id in target_ids:
+                self.database.vehicle_control_states.pop(actor_id, None)
+                self.database.walker_ai_states.pop(actor_id, None)
+
+    def _prepare_load_clear_lifecycle(self, plan):
+        self.database.scenario_event_queue.put((
+            "scenario_load_destructive_started",
+            {"target_map": None, "map_change": False},
+        ))
+        self._prepare_clear_lifecycle(plan)
+
+    def _finish_clear_operation(self):
+        with self.scenario_operation_lock:
+            self.active_clear_plan = None
+            self.clear_execution_queued = False
+            self.scenario_operation_pending = False
+            self.scenario_operation_kind = None
+
+    def _finish_load_operation(self):
+        with self.scenario_operation_lock:
+            self.active_load_plan = None
+            self.load_execution_queued = False
+            self.scenario_operation_pending = False
+            self.scenario_operation_kind = None
+
+    def _invalidate_load_plan_if_episode_changed(self, world):
+        invalidated = None
+        try:
+            current_world_id = int(world.id)
+        except (AttributeError, TypeError, ValueError):
+            current_world_id = None
+        with self.scenario_operation_lock:
+            if self.scenario_operation_kind == "load":
+                return False
+            plan = self.active_load_plan
+            if plan is not None and plan.world_id != current_world_id:
+                invalidated = plan
+                self.active_load_plan = None
+        if invalidated is not None:
+            self.database.scenario_event_queue.put((
+                "scenario_load_plan_invalidated",
+                {
+                    "token": invalidated.token,
+                    "reason": "world_episode_changed",
+                    "previous_world_id": invalidated.world_id,
+                    "current_world_id": current_world_id,
+                },
+            ))
+        return invalidated is not None
 
     @staticmethod
     def _actor_id(actor):
@@ -1090,6 +1793,34 @@ class CarlaController:
 
     def shutdown(self):
         print("Shutting down CARLA...")
+        cancelled_plan = None
+        operation_lock = getattr(self, "scenario_operation_lock", None)
+        if operation_lock is not None:
+            with operation_lock:
+                active_plan = getattr(self, "active_clear_plan", None)
+                self.active_load_plan = None
+                if self.scenario_operation_kind in (
+                    "load_preflight",
+                    "load",
+                ):
+                    self.scenario_operation_pending = False
+                    self.scenario_operation_kind = None
+                    self.load_execution_queued = False
+                if active_plan is not None:
+                    cancelled_plan = active_plan
+                    self.active_clear_plan = None
+                    self.clear_execution_queued = False
+                    self.scenario_operation_pending = False
+                    self.scenario_operation_kind = None
+        if cancelled_plan is not None:
+            self.database.scenario_event_queue.put((
+                "world_clear_completed",
+                WorldClearReport.cancelled(
+                    cancelled_plan.mode,
+                    cancelled_plan.planned_count,
+                    "Clear World was cancelled during disconnect.",
+                ).to_dict(),
+            ))
         self.shutdown_event.set()
         self.running = False
         if self.thread is None or not self.thread.is_alive():
@@ -1692,6 +2423,7 @@ class CarlaController:
                 "controller_id": None,
                 "target": self._serialize_location(target),
                 "random_navigation": True,
+                "state_source": "gui",
                 "status": (
                     "Walker autopilot running with direct control."
                     if target is not None else
@@ -1758,6 +2490,7 @@ class CarlaController:
                         "status": "Walker AI is stopped and can be resumed.",
                         "speed": speed,
                         "target": None,
+                        "state_source": "gui",
                         "error": None,
                     })
             self._publish_walker_ai_state(walker_id, session_id=session_id)
@@ -1805,6 +2538,7 @@ class CarlaController:
             with self.database.lock:
                 state = self.database.walker_ai_states[walker_id]
                 state["speed"] = speed
+                state["state_source"] = "gui"
                 state["status"] = (
                     f"Walker AI speed set to {speed:.1f} m/s."
                     if active else
@@ -2132,45 +2866,279 @@ class CarlaController:
             ))
 
 
+    def _managed_operation_allowed(self, actor_id, sensor=False):
+        actor_id = int(actor_id)
+        with self.database.lock:
+            if sensor:
+                allowed = self.database.is_sensor_managed(actor_id)
+            else:
+                allowed = self.database.is_actor_managed(actor_id)
+        if allowed:
+            return True
+        actor_kind = "sensor" if sensor else "actor"
+        self.database.scenario_event_queue.put((
+            "world_sync_operation_blocked",
+            {
+                "message": (
+                    f"The selected {actor_kind} is external and cannot be "
+                    "modified until ownership takeover is implemented."
+                ),
+                "actor_id": actor_id,
+            },
+        ))
+        return False
+
     def spawn_actor(self, actor_data):
+        if self._scenario_mutation_blocked("spawn actor"):
+            return False
         self.command_queue.put(("spawn", actor_data))
+        return True
+
+    def sync_world(self, reason="manual"):
+        self.command_queue.put(("sync_world", reason))
+
+    def save_scenario(self, name, path, file_format):
+        try:
+            target = normalize_scenario_path(path, file_format)
+        except ScenarioPathError as error:
+            self.database.scenario_event_queue.put((
+                "scenario_save_error",
+                {"message": str(error)},
+            ))
+            return False
+        with self.scenario_operation_lock:
+            if self.scenario_operation_pending:
+                event_name = (
+                    "scenario_operation_blocked"
+                    if getattr(self, "scenario_operation_kind", None) == "clear"
+                    else "scenario_save_error"
+                )
+                self.database.scenario_event_queue.put((event_name, {
+                    "message": "Another scenario operation is pending."
+                }))
+                return False
+            if self.shutdown_event.is_set() or not self.running:
+                self.database.scenario_event_queue.put((
+                    "scenario_save_error",
+                    {"message": "CARLA is disconnecting."},
+                ))
+                return False
+            self.scenario_operation_pending = True
+            self.scenario_operation_kind = "save"
+            self.active_load_plan = None
+        self.command_queue.put(("save_scenario", {
+            "name": str(name),
+            "path": str(target),
+            "format": str(file_format),
+        }))
+        return True
+
+    def prepare_clear_world(self, mode):
+        try:
+            normalized_mode = ClearMode.normalize(mode)
+        except ValueError as error:
+            self.database.scenario_event_queue.put((
+                "world_clear_error",
+                {"message": str(error), "phase": "preflight"},
+            ))
+            return False
+        with self.scenario_operation_lock:
+            if self.scenario_operation_pending:
+                self.database.scenario_event_queue.put((
+                    "scenario_operation_blocked",
+                    {
+                        "message": "Another scenario operation is pending.",
+                    },
+                ))
+                return False
+            if self.shutdown_event.is_set() or not self.running:
+                self.database.scenario_event_queue.put((
+                    "world_clear_error",
+                    {
+                        "message": "CARLA is disconnecting.",
+                        "phase": "preflight",
+                    },
+                ))
+                return False
+            self.scenario_operation_pending = True
+            self.scenario_operation_kind = "clear"
+            self.active_load_plan = None
+            self.active_clear_plan = None
+            self.clear_execution_queued = False
+        self.command_queue.put(("prepare_clear_world", normalized_mode))
+        return True
+
+    def execute_clear_world(self, token, confirmed=True):
+        with self.scenario_operation_lock:
+            plan = self.active_clear_plan
+            if (
+                not self.scenario_operation_pending
+                or plan is None
+                or plan.token != str(token)
+                or self.clear_execution_queued
+            ):
+                self.database.scenario_event_queue.put((
+                    "world_clear_error",
+                    {
+                        "message": (
+                            "The Clear World plan is no longer valid. Run "
+                            "preflight again."
+                        ),
+                        "phase": "execute",
+                    },
+                ))
+                return False
+            self.clear_execution_queued = True
+        self.command_queue.put(("execute_clear_world", {
+            "token": str(token),
+            "confirmed": bool(confirmed),
+            "mode": plan.mode,
+        }))
+        return True
 
     def change_world(self, new_world):
+        with self.scenario_operation_lock:
+            if self.scenario_operation_pending:
+                self.database.scenario_event_queue.put((
+                    "scenario_operation_blocked",
+                    {
+                        "message": (
+                            "A scenario operation is pending; the map was "
+                            "not changed."
+                        ),
+                    },
+                ))
+                return False
+            self.active_load_plan = None
         self.world_changed_event.clear()
         self.database.world_changed = False
         self.database.world_change_error = None
         self.command_queue.put(("change_world", new_world))
+        return True
+
+    def prepare_load_scenario(self, path):
+        source_path = str(path or "").strip()
+        if not source_path:
+            self.database.scenario_event_queue.put((
+                "scenario_load_preflight_error",
+                {"message": "Scenario path is required.", "path": source_path},
+            ))
+            return False
+        with self.scenario_operation_lock:
+            if self.scenario_operation_pending:
+                self.database.scenario_event_queue.put((
+                    "scenario_operation_blocked",
+                    {"message": "Another scenario operation is pending."},
+                ))
+                return False
+            if self.shutdown_event.is_set() or not self.running:
+                self.database.scenario_event_queue.put((
+                    "scenario_load_preflight_error",
+                    {
+                        "message": "CARLA is disconnecting.",
+                        "path": source_path,
+                    },
+                ))
+                return False
+            self.active_load_plan = None
+            self.load_execution_queued = False
+            self.scenario_operation_pending = True
+            self.scenario_operation_kind = "load_preflight"
+        self.command_queue.put((
+            "prepare_load_scenario",
+            {"path": source_path},
+        ))
+        return True
+
+    def execute_load_scenario(self, plan_token, confirmed=True):
+        with self.scenario_operation_lock:
+            plan = self.active_load_plan
+            if (
+                self.scenario_operation_pending
+                or plan is None
+                or plan.token != str(plan_token)
+                or self.load_execution_queued
+            ):
+                self.database.scenario_event_queue.put((
+                    "scenario_load_error",
+                    {
+                        "message": (
+                            "The Scenario Load plan is no longer valid or "
+                            "another scenario operation is pending."
+                        ),
+                        "phase": "preflight",
+                    },
+                ))
+                return False
+            if self.shutdown_event.is_set() or not self.running:
+                self.database.scenario_event_queue.put((
+                    "scenario_load_error",
+                    {
+                        "message": "CARLA is disconnecting.",
+                        "phase": "preflight",
+                    },
+                ))
+                return False
+            self.scenario_operation_pending = True
+            self.scenario_operation_kind = "load"
+            self.load_execution_queued = True
+        self.command_queue.put((
+            "execute_load_scenario",
+            {
+                "token": str(plan_token),
+                "confirmed": bool(confirmed),
+            },
+        ))
+        return True
 
     def change_weather(self, new_weather):
+        if self._scenario_mutation_blocked("change weather"):
+            return False
         self.command_queue.put(("change_weather", new_weather))
+        return True
 
     def get_simulation_settings(self):
         self.command_queue.put(("get_simulation_settings", None))
 
     def apply_simulation_settings(self, settings):
+        if self._scenario_mutation_blocked("apply simulation settings"):
+            return False
         self.command_queue.put(("apply_simulation_settings", settings))
+        return True
 
     def set_tick_controller(self, controller):
+        if self._scenario_mutation_blocked("change tick controller"):
+            return False
         self.command_queue.put(("set_tick_controller", controller))
+        return True
 
     def run_simulation(self):
+        if self._scenario_mutation_blocked("run simulation"):
+            return False
         self.command_queue.put(("run_simulation", None))
+        return True
 
     def pause_simulation(self):
         self.priority_command_queue.put(("pause_simulation", None))
 
     def step_simulation(self, count=1):
+        if self._scenario_mutation_blocked("step simulation"):
+            return False
         self.command_queue.put(("step_simulation", count))
+        return True
 
     def stop_simulation_control(self):
         self.priority_command_queue.put(("stop_simulation_control", None))
 
     def spawn_preview_actor(self, blueprint_id, transform, image_callback):
+        if self._scenario_mutation_blocked("spawn preview actor"):
+            return False
         self.command_queue.put(("spawn_preview_actor", {
             "blueprint_id": blueprint_id,
             "transform": transform,
             "image_callback": image_callback,
         }))
+        return True
 
     def set_ghost_transform(self, transform):
         self.command_queue.put(("set_ghost_transform", transform))
@@ -2184,38 +3152,80 @@ class CarlaController:
         )
 
     def remove_actor(self, actor_id):
+        if self._scenario_mutation_blocked("remove actor"):
+            return False
+        if not self._managed_operation_allowed(actor_id):
+            return False
         self.command_queue.put(("remove_actor", actor_id))
+        return True
 
     def apply_new_physics_and_blueprint_to_ghost(self, physics_control):
         self.command_queue.put(("apply_new_physics_and_blueprint_to_ghost", physics_control))
 
     def change_actor_model(self, blueprint_id, actor_id):
+        if self._scenario_mutation_blocked("change actor model"):
+            return False
+        if not self._managed_operation_allowed(actor_id):
+            return False
         self.command_queue.put(("change_actor_model", [blueprint_id, actor_id]))
+        return True
 
     def set_actor_transform(self, new_transform, actor_id):
+        if self._scenario_mutation_blocked("change actor transform"):
+            return False
+        if not self._managed_operation_allowed(actor_id):
+            return False
         self.command_queue.put(("set_actor_transform", [new_transform, actor_id]))
+        return True
 
     def attach_sensor(self, sensor_data):
+        if self._scenario_mutation_blocked("attach sensor"):
+            return False
         self.command_queue.put(("attach_sensor", sensor_data))
+        return True
 
     def remove_sensor(self, sensor_id):
+        if self._scenario_mutation_blocked("remove sensor"):
+            return False
+        if not self._managed_operation_allowed(sensor_id, sensor=True):
+            return False
         self.command_queue.put(("remove_sensor", sensor_id))
+        return True
 
     def change_sensor_transform(self, sensor_id, transform):
+        if self._scenario_mutation_blocked("change sensor transform"):
+            return False
+        if not self._managed_operation_allowed(sensor_id, sensor=True):
+            return False
         self.command_queue.put(("change_sensor_transform", [sensor_id, transform]))
+        return True
 
     def start_sensor_preview(self, sensor_id, image_callback, preview_buffer):
+        if self._scenario_mutation_blocked("start sensor preview"):
+            preview_buffer.set_error("A scenario operation is pending.")
+            return False
+        if not self._managed_operation_allowed(sensor_id, sensor=True):
+            preview_buffer.set_error(
+                "External sensors cannot be previewed until ownership "
+                "takeover is implemented."
+            )
+            return False
         self.command_queue.put(("start_sensor_preview", {
             "sensor_id": sensor_id,
             "image_callback": image_callback,
             "preview_buffer": preview_buffer
         }))
+        return True
 
     def stop_sensor_preview(self, sensor_id):
         self.command_queue.put(("stop_sensor_preview", sensor_id))
 
     def start_movement_preview(self, session_id, actor_id, actor_type,
                                preset, publisher, control_queue):
+        if self._scenario_mutation_blocked("start movement preview"):
+            return False
+        if not self._managed_operation_allowed(actor_id):
+            return False
         self.command_queue.put(("start_movement_preview", {
             "session_id": session_id,
             "actor_id": actor_id,
@@ -2224,28 +3234,105 @@ class CarlaController:
             "publisher": publisher,
             "control_queue": control_queue,
         }))
+        return True
 
     def set_vehicle_control_mode(self, session_id, actor_id, mode):
+        if self._scenario_mutation_blocked("change vehicle control"):
+            return False
+        if not self._managed_operation_allowed(actor_id):
+            return False
         self.command_queue.put(("set_vehicle_control_mode", {
             "session_id": session_id,
             "actor_id": actor_id,
             "mode": mode,
         }))
+        return True
 
     def set_walker_ai_enabled(self, session_id, actor_id, enabled, speed):
+        if self._scenario_mutation_blocked("change pedestrian control"):
+            return False
+        if not self._managed_operation_allowed(actor_id):
+            return False
         self.command_queue.put(("set_walker_ai_enabled", {
             "session_id": session_id,
             "actor_id": actor_id,
             "enabled": bool(enabled),
             "speed": speed,
         }))
+        return True
 
     def set_walker_ai_speed(self, session_id, actor_id, speed):
+        if self._scenario_mutation_blocked("change pedestrian speed"):
+            return False
+        if not self._managed_operation_allowed(actor_id):
+            return False
         self.command_queue.put(("set_walker_ai_speed", {
             "session_id": session_id,
             "actor_id": actor_id,
             "speed": speed,
         }))
+        return True
+
+    def take_actor_ownership(self, runtime_id):
+        try:
+            runtime_id = int(runtime_id)
+        except (TypeError, ValueError):
+            return False
+        expected = self.actor_adopter.expected_identity(
+            self.database,
+            runtime_id,
+        )
+        if expected is None:
+            self.database.scenario_event_queue.put((
+                "actor_ownership_result",
+                ActorAdoptionReport(
+                    status=AdoptionStatus.ACTOR_MISSING,
+                    runtime_id=runtime_id,
+                    message="The actor is missing from synchronized data.",
+                ).to_dict(),
+            ))
+            return False
+        with self.scenario_operation_lock:
+            if (
+                self.scenario_operation_pending
+                or self.shutdown_event.is_set()
+                or not self.running
+            ):
+                self.database.scenario_event_queue.put((
+                    "actor_ownership_result",
+                    ActorAdoptionReport(
+                        status=AdoptionStatus.OPERATION_CONFLICT,
+                        runtime_id=runtime_id,
+                        world_id=expected.get("world_id"),
+                        message=(
+                            "Take Ownership is unavailable while another "
+                            "scenario operation or disconnect is pending."
+                        ),
+                    ).to_dict(),
+                ))
+                return False
+            self.scenario_operation_pending = True
+            self.scenario_operation_kind = "adoption"
+        self.command_queue.put(("take_actor_ownership", {
+            "runtime_id": runtime_id,
+            "expected_identity": expected,
+        }))
+        return True
+
+    def _scenario_mutation_blocked(self, operation):
+        with self.scenario_operation_lock:
+            blocked = self.scenario_operation_pending
+        if blocked:
+            self.database.scenario_event_queue.put((
+                "scenario_operation_blocked",
+                {
+                    "message": (
+                        f"Cannot {operation} while a scenario operation is "
+                        "pending."
+                    ),
+                },
+            ))
+        return blocked
 
     def set_movement_preview_transform(self, session_id, preset):
         self.command_queue.put(("set_movement_preview_transform", {

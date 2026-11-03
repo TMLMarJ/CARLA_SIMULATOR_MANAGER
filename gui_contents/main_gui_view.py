@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import ttk
+from tkinter import filedialog, ttk
 
 from utilities.functions import filter_carla_id_by_type, return_data_from_transform, wait_and_try
 from gui_contents.spawn_preview import VehiclePreviewFrame, GhostPreview
@@ -11,6 +11,10 @@ import carla
 import numpy as np
 from simulation_manager import SimulationManager
 from gui_contents.simulation_dashboard_view import SimulationDashboardFrame
+from scenario_management.path_utils import (
+    UnknownScenarioExtensionError,
+    normalize_scenario_path,
+)
 
 
 class CustomMainViewFrame(ttk.Frame):
@@ -56,7 +60,10 @@ class CustomMainViewFrame(ttk.Frame):
         self.spectator_frame = SpectatorFrame(self.content_frame, self.controller)
         self.spectator_frame.grid(row=0, column=1, padx=5, pady=5, sticky="nw")
 
-        self.dashboard_frame = SimulationDashboardFrame(self.content_frame)
+        self.dashboard_frame = SimulationDashboardFrame(
+            self.content_frame,
+            self.controller,
+        )
         self.dashboard_frame.grid(
             row=1,
             column=0,
@@ -93,6 +100,7 @@ class ConnectionFrame(ttk.Frame):
 
         self.host_var = tk.StringVar(value="127.0.0.1")
         self.port_var = tk.StringVar(value="2000")
+        self.sync_status_var = tk.StringVar(value="")
 
         self._create_widgets()
 
@@ -103,7 +111,7 @@ class ConnectionFrame(ttk.Frame):
         ).pack(pady=10)
 
         input_frame = ttk.Frame(self)
-        input_frame.pack(pady=10)
+        input_frame.pack(pady=10, anchor="w")
 
         ttk.Label(
             input_frame,
@@ -129,20 +137,51 @@ class ConnectionFrame(ttk.Frame):
         )
         self.port_entry.grid(row=1, column=1, padx=5, pady=5)
 
+        actions_frame = ttk.Frame(self)
+        actions_frame.pack(fill="x", anchor="w")
+
         self.connect_button = ttk.Button(
-            self,
+            actions_frame,
             text="Connect",
             command=self.connect
         )
         self.connect_button.pack(pady=5, padx=5, side="left")
 
         self.disconnect_button = ttk.Button(
-            self,
+            actions_frame,
             text="Disconnect",
             command=self.manager.disconnect_from_carla,
             state="disabled"
         )
         self.disconnect_button.pack(pady=5, padx=5, side="left")
+
+        self.refresh_world_button = ttk.Button(
+            actions_frame,
+            text="Refresh World",
+            command=self.manager.refresh_world,
+            state="disabled",
+        )
+        self.refresh_world_button.pack(pady=5, padx=5, side="left")
+
+        self.sync_status_label = ttk.Label(
+            self,
+            textvariable=self.sync_status_var,
+            anchor="w",
+            justify="left",
+            width=1,
+        )
+        self.sync_status_label.pack(
+            fill="x",
+            anchor="w",
+            pady=(0, 5),
+            padx=5,
+        )
+        self.bind("<Configure>", self._resize_sync_status)
+
+    def _resize_sync_status(self, event):
+        self.sync_status_label.configure(
+            wraplength=max(1, event.width - 10),
+        )
 
     def connect(self):
         host = self.host_var.get().strip()
@@ -172,9 +211,368 @@ class ConnectionFrame(ttk.Frame):
         self.disconnect_button.configure(
             state="normal" if connected and not busy else "disabled"
         )
+        self.refresh_world_button.configure(
+            state="normal" if connected and not busy else "disabled"
+        )
 
         self.host_entry.configure(state=state)
         self.port_entry.configure(state=state)
+        if not connected and not busy:
+            self.sync_status_var.set("")
+
+    def set_sync_pending(self):
+        self.refresh_world_button.configure(state="disabled")
+        self.sync_status_var.set("Synchronizing...")
+
+    def show_sync_result(self, report):
+        error_count = len(report.get("errors", ()))
+        self.sync_status_var.set(
+            "World synchronized: "
+            f"+{report.get('added', 0)} / "
+            f"~{report.get('updated', 0)} / "
+            f"-{report.get('removed', 0)}"
+            f"{' / !' + str(error_count) if error_count else ''}"
+        )
+        if self.manager.connected and not self.manager.world_changing:
+            self.refresh_world_button.configure(state="normal")
+
+    def show_sync_error(self, message):
+        self.sync_status_var.set(f"Synchronization failed: {message}")
+        if self.manager.connected and not self.manager.world_changing:
+            self.refresh_world_button.configure(state="normal")
+
+
+class ScenarioSaveFrame(ttk.LabelFrame):
+    def __init__(self, parent, manager):
+        super().__init__(
+            parent,
+            text="Scenario Management",
+            style="Section.TLabelframe",
+            padding=(12, 8),
+        )
+        self.manager = manager
+        self.connected = False
+        self.pending = False
+        self.name_var = tk.StringVar(value="Scenario")
+        self.path_var = tk.StringVar(value="")
+        self.format_var = tk.StringVar(value="JSON")
+        self.clear_mode_var = tk.StringVar(value="Managed Actors Only")
+        self.status_var = tk.StringVar(
+            value="Connect to CARLA to manage scenarios."
+        )
+        self._create_widgets()
+
+    def _create_widgets(self):
+        self.grid_columnconfigure(3, weight=1)
+        ttk.Label(self, text="Name:").grid(
+            row=0, column=0, padx=(0, 5), pady=4, sticky="w"
+        )
+        self.name_entry = ttk.Entry(
+            self,
+            textvariable=self.name_var,
+            width=24,
+        )
+        self.name_entry.grid(row=0, column=1, padx=(0, 12), pady=4, sticky="w")
+        ttk.Label(self, text="Format:").grid(
+            row=0, column=2, padx=(0, 5), pady=4, sticky="w"
+        )
+        self.format_combo = ttk.Combobox(
+            self,
+            textvariable=self.format_var,
+            values=("JSON", "YAML"),
+            state="readonly",
+            width=8,
+        )
+        self.format_combo.grid(row=0, column=3, pady=4, sticky="w")
+        self.format_combo.bind(
+            "<<ComboboxSelected>>",
+            self._on_format_changed,
+        )
+
+        ttk.Label(self, text="File:").grid(
+            row=1, column=0, padx=(0, 5), pady=4, sticky="w"
+        )
+        self.path_entry = ttk.Entry(self, textvariable=self.path_var)
+        self.path_entry.grid(
+            row=1,
+            column=1,
+            columnspan=3,
+            padx=(0, 8),
+            pady=4,
+            sticky="ew",
+        )
+        self.browse_button = ttk.Button(
+            self,
+            text="Browse...",
+            command=self.browse,
+        )
+        self.browse_button.grid(row=1, column=4, padx=(0, 8), pady=4)
+        self.save_button = ttk.Button(
+            self,
+            text="Save Scenario",
+            command=self.save,
+            state="disabled",
+        )
+        self.save_button.grid(row=1, column=5, pady=4)
+        ttk.Label(
+            self,
+            textvariable=self.status_var,
+            anchor="w",
+        ).grid(
+            row=2,
+            column=0,
+            columnspan=6,
+            pady=(4, 0),
+            sticky="ew",
+        )
+
+        ttk.Separator(self, orient="horizontal").grid(
+            row=3,
+            column=0,
+            columnspan=6,
+            sticky="ew",
+            pady=(10, 6),
+        )
+        ttk.Label(self, text="Clear mode:").grid(
+            row=4,
+            column=0,
+            padx=(0, 5),
+            pady=4,
+            sticky="w",
+        )
+        self.clear_mode_combo = ttk.Combobox(
+            self,
+            textvariable=self.clear_mode_var,
+            values=("Managed Actors Only", "Entire World"),
+            state="readonly",
+            width=22,
+        )
+        self.clear_mode_combo.grid(
+            row=4,
+            column=1,
+            columnspan=2,
+            padx=(0, 12),
+            pady=4,
+            sticky="w",
+        )
+        self.clear_button = ttk.Button(
+            self,
+            text="Clear World",
+            command=self.clear_world,
+            state="disabled",
+        )
+        self.clear_button.grid(
+            row=4,
+            column=5,
+            pady=4,
+            sticky="e",
+        )
+        self.load_button = ttk.Button(
+            self,
+            text="Load Scenario",
+            command=self.load_scenario,
+            state="disabled",
+        )
+        self.load_button.grid(
+            row=4,
+            column=4,
+            padx=(0, 8),
+            pady=4,
+            sticky="e",
+        )
+        self._update_widget_state()
+
+    def browse(self):
+        file_format = self.format_var.get().lower()
+        extension = ".json" if file_format == "json" else ".yaml"
+        filetypes = (
+            (("JSON scenario", "*.json"), ("All files", "*.*"))
+            if file_format == "json"
+            else (("YAML scenario", "*.yaml *.yml"), ("All files", "*.*"))
+        )
+        path = filedialog.asksaveasfilename(
+            parent=self,
+            title="Save CARLA scenario",
+            defaultextension=extension,
+            initialfile=f"{self.name_var.get().strip() or 'Scenario'}{extension}",
+            filetypes=filetypes,
+        )
+        if path:
+            self._set_normalized_path(path, confirm_unknown=True)
+
+    def _on_format_changed(self, event=None):
+        path = self.path_var.get().strip()
+        if path:
+            self._set_normalized_path(path, confirm_unknown=False)
+
+    def _set_normalized_path(self, path, confirm_unknown):
+        file_format = self.format_var.get().strip().lower()
+        try:
+            target = normalize_scenario_path(path, file_format)
+        except UnknownScenarioExtensionError as error:
+            if not confirm_unknown:
+                messagebox.showwarning(
+                    "Scenario file extension",
+                    f"{error}\nThe path has not been changed.",
+                )
+                return False
+            if not messagebox.askyesno(
+                "Scenario file extension",
+                f"{error}\n\nUse the suggested file name?",
+            ):
+                return False
+            target = normalize_scenario_path(
+                path,
+                file_format,
+                allow_unknown=True,
+            )
+        self.path_var.set(str(target))
+        return True
+
+    def save(self):
+        name = self.name_var.get().strip()
+        path = self.path_var.get().strip()
+        file_format = self.format_var.get().strip().lower()
+        if not name:
+            messagebox.showerror(
+                "Save Scenario",
+                "Scenario name cannot be empty.",
+            )
+            return
+        if not path:
+            self.browse()
+            path = self.path_var.get().strip()
+            if not path:
+                return
+        if not self._set_normalized_path(path, confirm_unknown=True):
+            return
+        self.manager.save_scenario(
+            name,
+            self.path_var.get(),
+            file_format,
+        )
+
+    def clear_world(self):
+        self.manager.prepare_clear_world(self.clear_mode_var.get())
+
+    def load_scenario(self):
+        self.manager.load_scenario()
+
+    def set_connected(self, connected):
+        self.connected = bool(connected)
+        if not self.connected:
+            self.pending = False
+            self.status_var.set("Connect to CARLA to manage scenarios.")
+        self._update_widget_state()
+
+    def set_pending(self):
+        self.pending = True
+        self.status_var.set("Capturing and saving scenario...")
+        self._update_widget_state()
+
+    def set_clear_pending(self, status="Preparing Clear World preflight..."):
+        self.pending = True
+        self.status_var.set(status)
+        self._update_widget_state()
+
+    def set_load_pending(self, status="Validating scenario..."):
+        self.pending = True
+        self.status_var.set(status)
+        self._update_widget_state()
+
+    def show_load_preflight(self, plan):
+        self.status_var.set(
+            f"Load preflight {plan.get('status', 'unknown')}: "
+            f"{plan.get('actor_count', 0)} actor(s); waiting for confirmation."
+        )
+
+    def show_load_cancelled(self):
+        self.pending = False
+        self.status_var.set("Scenario Load cancelled; the world was not changed.")
+        self._update_widget_state()
+
+    def show_load_report(self, report):
+        self.pending = False
+        self.status_var.set(
+            f"Scenario Load {report.get('status', 'failed')}: restored "
+            f"{report.get('restored', 0)}/{report.get('planned', 0)}, "
+            f"skipped {report.get('skipped', 0)}, failed "
+            f"{report.get('failed', 0)}."
+        )
+        self._update_widget_state()
+
+    def show_load_error(self, message):
+        self.pending = False
+        self.status_var.set(f"Scenario Load failed: {message}")
+        self._update_widget_state()
+
+    def show_clear_preflight(self, plan):
+        self.status_var.set(
+            f"Preflight ready: {plan.get('planned_count', 0)} actor(s); "
+            "waiting for confirmation."
+        )
+
+    def show_clear_report(self, report):
+        self.pending = False
+        status = report.get("status", "failed")
+        if status == "cancelled":
+            self.status_var.set("Clear World cancelled.")
+        elif report.get("planned_count", 0) == 0:
+            self.status_var.set("World already clear.")
+        else:
+            self.status_var.set(
+                f"Clear World {status}: removed "
+                f"{report.get('removed', 0)}, already missing "
+                f"{report.get('already_missing', 0)}, failed "
+                f"{report.get('failed', 0)}."
+            )
+        self._update_widget_state()
+
+    def show_clear_error(self, message):
+        self.pending = False
+        self.status_var.set(f"Clear World failed: {message}")
+        self._update_widget_state()
+
+    def show_result(self, report):
+        self.pending = False
+        if report.get("path"):
+            self.path_var.set(report["path"])
+        skipped = sum(
+            report.get(field, 0)
+            for field in (
+                "skipped_runtime_only",
+                "skipped_unrestorable",
+                "skipped_external",
+                "skipped_unsupported",
+            )
+        )
+        self.status_var.set(
+            f"Saved {report.get('saved', 0)} actors "
+            f"({report.get('partial', 0)} partial), skipped "
+            f"{skipped}."
+        )
+        self._update_widget_state()
+
+    def show_error(self, message):
+        self.pending = False
+        self.status_var.set(f"Save failed: {message}")
+        self._update_widget_state()
+
+    def _update_widget_state(self):
+        enabled = self.connected and not self.pending
+        state = "normal" if enabled else "disabled"
+        self.name_entry.configure(state=state)
+        self.path_entry.configure(state=state)
+        self.browse_button.configure(state=state)
+        self.save_button.configure(state=state)
+        self.clear_button.configure(state=state)
+        self.load_button.configure(state=state)
+        self.format_combo.configure(
+            state="readonly" if enabled else "disabled"
+        )
+        self.clear_mode_combo.configure(
+            state="readonly" if enabled else "disabled"
+        )
 
 
 class SimulationControlFrame(ttk.Frame):
@@ -477,6 +875,16 @@ class SimulationControlFrame(ttk.Frame):
         )
         for column in range(6):
             control_frame.grid_columnconfigure(column, weight=1)
+
+        self.scenario_frame = ScenarioSaveFrame(self, self.manager)
+        self.scenario_frame.grid(
+            row=3,
+            column=0,
+            columnspan=6,
+            sticky="ew",
+            padx=8,
+            pady=(0, 8),
+        )
         self.grid_columnconfigure(0, weight=1)
 
     def _toggle_advanced(self):

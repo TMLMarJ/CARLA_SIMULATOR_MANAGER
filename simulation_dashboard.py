@@ -1,5 +1,8 @@
 import time
 
+from scenario_management.actor_classifier import ActorClassifier
+from scenario_management.models import ActorOwnership
+
 
 class SimulationDashboardMonitor:
     VEHICLES = "Vehicles"
@@ -222,8 +225,26 @@ class SimulationDashboardMonitor:
             try:
                 server_actors = list(world.get_actors())
                 with database.lock:
-                    managed_actor_ids = set(database.actors_db.actors_db)
-                    managed_sensor_ids = set(database.sensors_db.sensors_db)
+                    managed_actor_ids = {
+                        actor_id
+                        for actor_id, actor_info
+                        in database.actors_db.actors_db.items()
+                        if getattr(
+                            actor_info,
+                            "ownership",
+                            ActorOwnership.MANAGED,
+                        ) == ActorOwnership.MANAGED
+                    }
+                    managed_sensor_ids = {
+                        sensor_id
+                        for sensor_id, sensor_info
+                        in database.sensors_db.sensors_db.items()
+                        if getattr(
+                            sensor_info,
+                            "ownership",
+                            ActorOwnership.MANAGED,
+                        ) == ActorOwnership.MANAGED
+                    }
                 updated_at = self.wall_clock()
                 actor_statistics, sensor_statistics = (
                     self.build_actor_and_sensor_statistics(
@@ -370,13 +391,7 @@ class SimulationDashboardMonitor:
 
     @classmethod
     def classify_actor(cls, type_id):
-        if type_id.startswith("vehicle."):
-            return cls.VEHICLES
-        if type_id.startswith("walker."):
-            return cls.WALKERS
-        if type_id.startswith("sensor."):
-            return cls.SENSORS
-        return cls.OTHER
+        return ActorClassifier.dashboard_category(type_id)
 
     @classmethod
     def classify_ownership(cls, actor_id, gui_managed_ids, internal_actor_ids):

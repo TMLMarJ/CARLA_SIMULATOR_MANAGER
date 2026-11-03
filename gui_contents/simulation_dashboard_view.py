@@ -8,10 +8,13 @@ class SimulationDashboardFrame(ttk.Frame):
     OWNERSHIP_COLUMNS = ("GUI Managed", "External", "Internal")
     SENSOR_COLUMNS = ("actor_id", "type_id", "parent_id", "status")
 
-    def __init__(self, parent):
+    def __init__(self, parent, manager=None):
         super().__init__(parent)
+        self.manager = manager
         self.context_status = None
         self._last_revision = None
+        self.external_actor_choices = {}
+        self.adoption_pending = False
         self._create_variables()
         self._create_widgets()
         self.show_context("Disconnected")
@@ -34,6 +37,8 @@ class SimulationDashboardFrame(ttk.Frame):
             "last_error": tk.StringVar(value="-"),
             "viewer": tk.StringVar(value="Closed"),
         }
+        self.external_actor_var = tk.StringVar(value="")
+        self.adoption_status_var = tk.StringVar(value="")
 
     def _create_widgets(self):
         ttk.Label(self, text="Simulation Dashboard").grid(
@@ -184,6 +189,62 @@ class SimulationDashboardFrame(ttk.Frame):
         application_frame.grid_columnconfigure(1, weight=1)
         application_frame.grid_columnconfigure(3, weight=1)
 
+        adoption_frame = ttk.LabelFrame(
+            self,
+            text="External Actors",
+            style="Section.TLabelframe",
+            padding=(8, 6),
+        )
+        adoption_frame.grid(
+            row=4,
+            column=0,
+            columnspan=2,
+            sticky="ew",
+            padx=8,
+            pady=(0, 10),
+        )
+        self.external_actor_combo = ttk.Combobox(
+            adoption_frame,
+            textvariable=self.external_actor_var,
+            state="readonly",
+        )
+        self.external_actor_combo.grid(
+            row=0,
+            column=0,
+            sticky="ew",
+            padx=(4, 8),
+            pady=3,
+        )
+        self.external_actor_combo.bind(
+            "<<ComboboxSelected>>",
+            self._external_actor_selected,
+        )
+        self.take_ownership_button = ttk.Button(
+            adoption_frame,
+            text="Take Ownership",
+            command=self._take_selected_ownership,
+            state="disabled",
+        )
+        self.take_ownership_button.grid(
+            row=0,
+            column=1,
+            padx=4,
+            pady=3,
+        )
+        ttk.Label(
+            adoption_frame,
+            textvariable=self.adoption_status_var,
+            anchor="w",
+        ).grid(
+            row=1,
+            column=0,
+            columnspan=2,
+            sticky="ew",
+            padx=4,
+            pady=(2, 0),
+        )
+        adoption_frame.grid_columnconfigure(0, weight=1)
+
         self.grid_columnconfigure(0, weight=1)
         self.grid_columnconfigure(1, weight=1)
 
@@ -260,6 +321,7 @@ class SimulationDashboardFrame(ttk.Frame):
             if sensor_statistics.get("valid") and not sensor_statistics.get("stale")
             else []
         )
+        self._update_external_actors(actor_statistics)
         self._apply_status_styles(state, application_status.get("controller_thread_status"))
 
     def _update_application(self, status):
@@ -325,6 +387,90 @@ class SimulationDashboardFrame(ttk.Frame):
             self.simulation_vars[key].set("-")
         self._clear_actor_table()
         self._update_sensor_table([])
+        self._update_external_actors({"actors": []})
+
+    def _update_external_actors(self, statistics):
+        previous_choices = set(self.external_actor_choices)
+        choices = {}
+        for actor in statistics.get("actors", []):
+            if actor.get("ownership") != "External":
+                continue
+            type_id = str(actor.get("type_id") or "")
+            if not type_id.startswith((
+                "vehicle.",
+                "walker.pedestrian.",
+                "sensor.",
+                "static.",
+            )):
+                continue
+            actor_id = int(actor["actor_id"])
+            label = f"{actor_id} — {type_id}"
+            choices[label] = {
+                "runtime_id": actor_id,
+                "type_id": type_id,
+            }
+        previous = self.external_actor_var.get()
+        self.external_actor_choices = choices
+        values = tuple(choices)
+        self.external_actor_combo.configure(values=values)
+        if previous in choices:
+            self.external_actor_var.set(previous)
+        elif values:
+            self.external_actor_var.set(values[0])
+        else:
+            self.external_actor_var.set("")
+        if (
+            previous_choices != set(choices)
+            or previous != self.external_actor_var.get()
+        ):
+            self._external_actor_selected()
+
+    def _external_actor_selected(self, event=None):
+        selected = self.external_actor_choices.get(
+            self.external_actor_var.get()
+        )
+        enabled = selected is not None
+        if selected and selected["type_id"].startswith("static."):
+            enabled = False
+            self.adoption_status_var.set(
+                "External static adoption is blocked because CARLA cannot "
+                "verify runtime spawn provenance."
+            )
+        elif selected is not None:
+            self.adoption_status_var.set(
+                "Adoption does not prevent other CARLA clients from "
+                "controlling or deleting this actor."
+            )
+        else:
+            self.adoption_status_var.set("No adoptable external actor selected.")
+        self.take_ownership_button.configure(
+            state=(
+                "normal"
+                if enabled
+                and self.manager is not None
+                and not self.adoption_pending
+                else "disabled"
+            )
+        )
+
+    def _take_selected_ownership(self):
+        selected = self.external_actor_choices.get(
+            self.external_actor_var.get()
+        )
+        if selected is not None and self.manager is not None:
+            self.manager.confirm_take_actor_ownership(
+                selected["runtime_id"],
+                selected["type_id"],
+            )
+
+    def show_adoption_result(self, report):
+        self.adoption_status_var.set(
+            report.get("message") or report.get("status", "error")
+        )
+
+    def set_adoption_pending(self, pending):
+        self.adoption_pending = bool(pending)
+        self._external_actor_selected()
 
     def _apply_status_styles(self, simulation_state, thread_state):
         state_text = str(simulation_state or "")
