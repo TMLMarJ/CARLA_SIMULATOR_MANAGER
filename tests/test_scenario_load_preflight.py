@@ -209,6 +209,7 @@ class ScenarioLoadPreflightTests(unittest.TestCase):
         plan = self.prepare(valid_document())
         controller = CarlaController.__new__(CarlaController)
         controller.scenario_operation_lock = threading.Lock()
+        controller.scenario_operation_kind = None
         controller.active_load_plan = plan
         controller.database = SimpleNamespace(
             scenario_event_queue=queue.Queue(),

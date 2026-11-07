@@ -358,6 +358,7 @@ class ControllerClearTests(unittest.TestCase):
         controller = object.__new__(CarlaController)
         controller.scenario_operation_lock = threading.Lock()
         controller.scenario_operation_pending = False
+        controller.scenario_operation_kind = None
         controller.active_clear_plan = None
         controller.clear_execution_queued = False
         controller.shutdown_event = threading.Event()

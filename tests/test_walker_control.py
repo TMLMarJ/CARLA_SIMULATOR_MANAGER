@@ -209,6 +209,48 @@ class WalkerControlTests(unittest.TestCase):
             self.controller.database.walker_ai_states[21]["speed"],
         )
 
+    def test_random_walk_speed_change_persists_across_service_updates(self):
+        world = FakeWorld([FakeLocation(8.0)])
+        self.set_enabled(world, True, speed=1.3)
+
+        self.controller._set_walker_ai_speed({
+            "session_id": "session",
+            "actor_id": 21,
+            "speed": 2.5,
+        })
+        runtime = self.controller.walker_ai_runtime[21]
+        runtime["next_check"] = 0.0
+        runtime["last_frame"] = 1
+        self.controller._service_walker_ai(world, SimpleNamespace(frame=2))
+
+        self.assertAlmostEqual(2.5, self.walker.controls[-1].speed)
+        self.assertAlmostEqual(2.5, runtime["speed"])
+        self.assertAlmostEqual(
+            2.5,
+            self.controller.database.walker_ai_states[21]["speed"],
+        )
+
+    def test_manual_speed_change_updates_active_walker_control(self):
+        self.controller._set_walker_manual_control({
+            "session_id": "session",
+            "actor_id": 21,
+            "direction_x": 1.0,
+            "direction_y": 0.0,
+            "speed": 1.1,
+        })
+
+        self.controller._set_walker_ai_speed({
+            "session_id": "session",
+            "actor_id": 21,
+            "speed": 2.2,
+        })
+
+        self.assertAlmostEqual(2.2, self.walker.controls[-1].speed)
+        self.assertAlmostEqual(
+            2.2,
+            self.controller.database.walker_ai_states[21]["speed"],
+        )
+
     def test_finishing_direct_leg_assigns_another_target(self):
         first = FakeLocation(5.0)
         second = FakeLocation(12.0)

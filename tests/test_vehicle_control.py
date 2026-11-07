@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from carla_server.carla_server import CarlaController
 from vehicle_control import (
     AUTOPILOT,
+    AUTOPILOT_FREE_ROAM,
     MANUAL_CONTROL,
     NO_CONTROL,
     initial_vehicle_control_state,
@@ -123,7 +124,7 @@ class VehicleControlTests(unittest.TestCase):
         self.change_mode(AUTOPILOT)
 
         state = self.controller.database.vehicle_control_states[7]
-        self.assertEqual(AUTOPILOT, state["mode"])
+        self.assertEqual(AUTOPILOT_FREE_ROAM, state["mode"])
         self.assertEqual([(True, 8000)], self.vehicle.autopilot_calls)
         self.assertEqual([True], self.traffic_manager.sync_modes)
 
@@ -147,7 +148,7 @@ class VehicleControlTests(unittest.TestCase):
         self.change_mode(AUTOPILOT)
         self.controller.cleanup_movement_preview("closed")
         self.assertEqual(
-            AUTOPILOT,
+            AUTOPILOT_FREE_ROAM,
             self.controller.database.vehicle_control_states[7]["mode"],
         )
         self.assertNotIn((False, 8000), self.vehicle.autopilot_calls)

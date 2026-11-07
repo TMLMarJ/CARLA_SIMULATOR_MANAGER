@@ -2,19 +2,23 @@ import tkinter as tk
 from typing import List, Any
 
 import carla
-from tkinter import ttk
+from tkinter import messagebox, ttk
 from gui_contents.color_picker import ColorPicker
 from utilities.functions import rgb_to_hex, hex_to_rgb
 
 
 class EntityEditWindow(tk.Toplevel):
-    def __init__(self, parent, blueprint, entity=None, type="actor", blueprint_library=None, physic = None, on_apply = None, blueprint_data=None):
+    def __init__(self, parent, blueprint, entity=None, type="actor",
+                 blueprint_library=None, physic=None, on_apply=None,
+                 blueprint_data=None, show_blueprint=True,
+                 show_physics=True):
         super().__init__(parent)
 
         self.blueprint = blueprint_library.find(blueprint)
         self.entity = entity
         self.type = type
-        self.supports_vehicle_physics = type == "vehicle"
+        self.show_blueprint = bool(show_blueprint)
+        self.supports_vehicle_physics = type == "vehicle" and show_physics
         self.on_apply = on_apply
         self.row = None
         self.column = None
@@ -22,13 +26,13 @@ class EntityEditWindow(tk.Toplevel):
             self.physic = carla.VehiclePhysicsControl()
         else:
             self.physic = physic
-        if blueprint_data is None:
-            self.attribute_vars = {}
-        else:
-            self.attribute_vars = blueprint_data
-            for attr_id, attr_info in self.attribute_vars.items():
+        self.attribute_vars = {}
+        if self.show_blueprint and blueprint_data is not None:
+            for attr_id, attr_info in blueprint_data.items():
                 if self.blueprint.has_attribute(attr_id):
-                    self.blueprint.set_attribute(attr_id, str(attr_info))
+                    attribute = self.blueprint.get_attribute(attr_id)
+                    if attribute.is_modifiable:
+                        self.blueprint.set_attribute(attr_id, str(attr_info))
         self.physics_vars = {
             "torque_curve": [],
             "max_rpm": tk.DoubleVar(value=self.physic.max_rpm),
@@ -59,7 +63,8 @@ class EntityEditWindow(tk.Toplevel):
         self.SteeringTab = ttk.Frame(self.tabControl)
         self.WheelsTab = ttk.Frame(self.tabControl)
 
-        self.tabControl.add(self.BlueprintTab, text="Blueprint")
+        if self.show_blueprint:
+            self.tabControl.add(self.BlueprintTab, text="Blueprint")
         if self.supports_vehicle_physics:
             self.tabControl.add(self.PhysicsTab, text="Physics")
             self.tabControl.add(self.GearsTab, text="Gears")
@@ -75,8 +80,9 @@ class EntityEditWindow(tk.Toplevel):
         self.torque_parameters_frame = ttk.Frame(self.TorqueTab)
         self.steering_parameters_frame = ttk.Frame(self.SteeringTab)
 
-        self.blueprint_parameters_frame.grid(row=0, column=0, sticky="nsew")
-        self.create_blueprint_section()
+        if self.show_blueprint:
+            self.blueprint_parameters_frame.grid(row=0, column=0, sticky="nsew")
+            self.create_blueprint_section()
         if self.supports_vehicle_physics:
             self.physics_parameters_frame.grid(row=0, column=0, sticky="nsew")
             self.create_physic_section()
@@ -283,9 +289,6 @@ class EntityEditWindow(tk.Toplevel):
             self.row += 1
             color_picker = ColorPicker(parent_frame, color=default_value_hex)
             color_picker.grid(row=self.row, column=self.column, sticky="w", padx=20)
-            var = hex_to_rgb(color_picker.color)
-            print(var)
-
             self.attribute_vars[attribute.id] = {
                 "type": attribute.type,
                 "widget": color_picker
@@ -306,7 +309,6 @@ class EntityEditWindow(tk.Toplevel):
                 blueprint_data[attr_id] = attr_info["var"].get()
             elif attr_info["type"] == carla.ActorAttributeType.RGBColor:
                 blueprint_data[attr_id] = hex_to_rgb(attr_info["widget"].color)
-                print(blueprint_data[attr_id])
 
         if not self.supports_vehicle_physics:
             return {"blueprint": blueprint_data, "physics": None}
@@ -334,32 +336,41 @@ class EntityEditWindow(tk.Toplevel):
         steering = self.steering_table.get_data()
         wheels = self.wheels_table.get_data()
 
-        physics_data = carla.VehiclePhysicsControl(
-            torque_curve=torque_curve,
-            max_rpm=max_rpm,
-            moi=moi,
-            damping_rate_full_throttle=damping_rate_full_throttle,
-            damping_rate_zero_throttle_clutch_engaged=damping_rate_zero_throttle_clutch_engaged,
-            damping_rate_zero_throttle_clutch_disengaged=damping_rate_zero_throttle_clutch_disengaged,
-            use_gear_autobox=use_gear_autobox,
-            gear_switch_time=gear_switch_time,
-            clutch_strength=clutch_strength,
-            final_ratio=final_ratio,
-            forward_gears=gears,
-            mass=mass,
-            drag_coefficient=drag_coefficient,
-            center_of_mass=center_of_mass,
-            steering_curve=steering,
-            use_sweep_wheel_collision=use_sweep_wheel_collision,
-            wheels=wheels
-        )
+        # Preserve CARLA fields not exposed by this editor by updating the
+        # control object that was read from the actor.
+        physics_data = self.physic
+        physics_data.torque_curve = torque_curve
+        physics_data.max_rpm = max_rpm
+        physics_data.moi = moi
+        physics_data.damping_rate_full_throttle = damping_rate_full_throttle
+        physics_data.damping_rate_zero_throttle_clutch_engaged = damping_rate_zero_throttle_clutch_engaged
+        physics_data.damping_rate_zero_throttle_clutch_disengaged = damping_rate_zero_throttle_clutch_disengaged
+        physics_data.use_gear_autobox = use_gear_autobox
+        physics_data.gear_switch_time = gear_switch_time
+        physics_data.clutch_strength = clutch_strength
+        physics_data.final_ratio = final_ratio
+        physics_data.forward_gears = gears
+        physics_data.mass = mass
+        physics_data.drag_coefficient = drag_coefficient
+        physics_data.center_of_mass = center_of_mass
+        physics_data.steering_curve = steering
+        physics_data.use_sweep_wheel_collision = use_sweep_wheel_collision
+        physics_data.wheels = wheels
         return {"blueprint": blueprint_data, "physics": physics_data}
 
     def apply(self):
-        data = self.get_data()
-        if self.on_apply:
-            self.on_apply(data)
-        self.destroy()
+        try:
+            data = self.get_data()
+            accepted = self.on_apply(data) if self.on_apply else True
+        except (tk.TclError, TypeError, ValueError, RuntimeError) as error:
+            messagebox.showerror(
+                "Invalid actor configuration",
+                str(error),
+                parent=self,
+            )
+            return
+        if accepted is not False:
+            self.destroy()
 
 class GearManagerTable(ttk.Frame):
     def __init__(self, parent, gears):
@@ -400,13 +411,32 @@ class GearManagerTable(ttk.Frame):
         self.down_button = ttk.Button(self.button_frame, text="▼", command=self.move_down)
         self.down_button.pack(side="top")
 
+        self.add_gear_button = ttk.Button(
+            self.button_frame,
+            text="Add",
+            command=lambda: self.add_gear(carla.GearPhysicsControl()),
+        )
+        self.add_gear_button.pack(side="top", pady=(10, 5))
+        self.delete_gear_button = ttk.Button(
+            self.button_frame,
+            text="Remove",
+            command=self.delete_selected,
+        )
+        self.delete_gear_button.pack(side="top")
+
 
     def add_gear(self, gear):
-        gear_number = len(self.treeview.get_children())
+        gear_number = len(self._gear_items()) + 1
 
         item = self.treeview.insert("", self.treeview.index(self.add_button), values=(gear_number, gear.ratio, gear.down_ratio, gear.up_ratio))
 
         return item
+
+    def _gear_items(self):
+        return [
+            item for item in self.treeview.get_children()
+            if item != self.add_button
+        ]
 
     def edit_cell(self, event):
         region = self.treeview.identify("region", event.x, event.y)
@@ -472,9 +502,7 @@ class GearManagerTable(ttk.Frame):
 
     def renumber_gears(self):
         number = 1
-        for item in self.treeview.get_children():
-            if item == self.add_button:
-                continue
+        for item in self._gear_items():
             self.treeview.set(item, "#1", number)
             number += 1
 
@@ -489,10 +517,12 @@ class GearManagerTable(ttk.Frame):
         if item == self.add_button:
             return
 
-        index = self.treeview.index(item)
+        items = self._gear_items()
+        index = items.index(item)
 
-        if index >0:
-            self.treeview.move(item, "", index - 1)
+        if index > 0:
+            previous_item = items[index - 1]
+            self.treeview.move(item, "", self.treeview.index(previous_item))
 
         self.renumber_gears()
 
@@ -507,19 +537,17 @@ class GearManagerTable(ttk.Frame):
         if item == self.add_button:
             return
 
-        index = self.treeview.index(item)
+        items = self._gear_items()
+        index = items.index(item)
 
-        if index < len(self.treeview.get_children()) - 2:
-            self.treeview.move(item, "", index + 1)
+        if index < len(items) - 1:
+            self.treeview.move(item, "", self.treeview.index(item) + 1)
 
         self.renumber_gears()
 
     def get_data(self):
         gears = []
-        for item in self.treeview.get_children():
-            if item == self.add_button:
-                continue
-            gear_number = int(self.treeview.set(item, "#1"))
+        for item in self._gear_items():
             ratio = float(self.treeview.set(item, "#2"))
             down_ratio = float(self.treeview.set(item, "#3"))
             up_ratio = float(self.treeview.set(item, "#4"))
@@ -888,7 +916,7 @@ class WheelsMenu(ttk.Frame):
         if not row or not column:
             return
 
-        if column == "#0":
+        if column == "#1":
             return
 
         bbox = self.treeview.bbox(row, column)

@@ -1,4 +1,5 @@
 import queue
+import threading
 import unittest
 import uuid
 from types import SimpleNamespace
@@ -282,6 +283,8 @@ class OwnershipGuardTests(unittest.TestCase):
         controller = object.__new__(CarlaController)
         controller.database = database
         controller.command_queue = queue.Queue()
+        controller.scenario_operation_lock = threading.Lock()
+        controller.scenario_operation_pending = False
 
         self.assertFalse(controller.remove_actor(90))
         self.assertTrue(controller.command_queue.empty())

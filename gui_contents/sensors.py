@@ -14,7 +14,7 @@ from gui_contents.sensors_preview import (
     SensorValuesPreviewTop,
     SpatialSensorPreviewTop
 )
-from utilities.functions import hex_to_rgb, rgb_to_hex
+from utilities.functions import actor_ownership_status, hex_to_rgb, rgb_to_hex
 
 
 class CustomSensorFrame(tk.Frame):
@@ -40,7 +40,15 @@ class CustomSensorFrame(tk.Frame):
         sensor_frame.grid_columnconfigure(0, weight=1)
         sensor_frame.grid_rowconfigure(0, weight=1)
 
-        columns = ("Name", "ID", "Type", "Parent", "Transform", "Status")
+        columns = (
+            "Name",
+            "ID",
+            "Type",
+            "Parent",
+            "Transform",
+            "Status",
+            "Ownership",
+        )
         self.tree = ttk.Treeview(
             sensor_frame,
             columns=columns,
@@ -57,9 +65,11 @@ class CustomSensorFrame(tk.Frame):
         self.tree.column("Parent", width=220, minwidth=150, anchor="center")
         self.tree.column("Transform", width=360, minwidth=260, anchor="center")
         self.tree.column("Status", width=90, minwidth=80, anchor="center")
+        self.tree.column("Ownership", width=100, minwidth=90, anchor="center")
 
         scrollbar = ttk.Scrollbar(sensor_frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scrollbar.set)
+        self.tree.bind("<Double-1>", self.edit_name)
         self.tree.grid(row=0, column=0, sticky="nsew", padx=(8, 0), pady=8)
         scrollbar.grid(row=0, column=1, sticky="ns", pady=8)
 
@@ -87,6 +97,54 @@ class CustomSensorFrame(tk.Frame):
         ).pack(
             side="left"
         )
+
+    def edit_name(self, event):
+        if self.tree.identify("region", event.x, event.y) != "cell":
+            return
+        column = self.tree.identify_column(event.x)
+        row = self.tree.identify_row(event.y)
+        if not row or column != "#1":
+            return
+        bounds = self.tree.bbox(row, column)
+        if not bounds:
+            return
+
+        entry = ttk.Entry(self.tree)
+        entry.insert(0, self.tree.set(row, column))
+        entry.place(x=bounds[0], y=bounds[1], width=bounds[2], height=bounds[3])
+        entry.focus()
+        entry.select_range(0, tk.END)
+
+        def save(event=None):
+            new_name = entry.get().strip()
+            if not new_name:
+                messagebox.showerror(
+                    "Invalid sensor name",
+                    "Sensor name cannot be empty.",
+                    parent=self,
+                )
+                entry.focus()
+                return
+            sensor_id = int(self.tree.item(row)["values"][1])
+            try:
+                new_name = self.database.rename_sensor(sensor_id, new_name)
+            except (KeyError, ValueError) as error:
+                messagebox.showerror(
+                    "Rename sensor",
+                    str(error),
+                    parent=self,
+                )
+                entry.destroy()
+                return
+            self.tree.set(row, column, new_name)
+            preview_window = self.preview_windows.get(sensor_id)
+            if preview_window is not None and preview_window.winfo_exists():
+                preview_window.update_display_name(new_name)
+            entry.destroy()
+
+        entry.bind("<Return>", save)
+        entry.bind("<FocusOut>", save)
+        entry.bind("<Escape>", lambda event: entry.destroy())
 
     def add_sensor(self, parent_id=None):
         AddSensorTop(self, self.controller, parent_id)
@@ -196,10 +254,8 @@ class CustomSensorFrame(tk.Frame):
                     parent = str(sensor_info.parent_id)
                 else:
                     parent = f"{parent_info.user_name} [{sensor_info.parent_id}]"
-                try:
-                    status = "Active" if sensor_info.sensor.is_alive else "Inactive"
-                except RuntimeError:
-                    status = "Inactive"
+                status = "Active" if sensor_info.is_alive else "Inactive"
+                ownership = actor_ownership_status(sensor_info)
                 if transform is None:
                     transform_text = "Unknown"
                 else:
@@ -216,7 +272,8 @@ class CustomSensorFrame(tk.Frame):
                     sensor_info.blueprint_id,
                     parent,
                     transform_text,
-                    status
+                    status,
+                    ownership,
                 ))
 
     def check_sensor_events(self):
@@ -231,13 +288,17 @@ class CustomSensorFrame(tk.Frame):
                     else:
                         for sensor_id in data:
                             self.close_sensor_preview(sensor_id)
+                elif status == "sensors_replaced":
+                    for old_sensor_id in data:
+                        self.close_sensor_preview(old_sensor_id)
                 if status in (
                     "sensor_attached",
                     "sensor_removed",
                     "sensor_transform_changed",
-                    "sensors_cleared"
+                    "sensors_cleared",
+                    "sensors_replaced",
                 ):
-                    self.refresh_table()
+                    self.controller.refresh_actor_tables()
                 elif status == "sensor_error":
                     messagebox.showerror("Sensor error", data, parent=self)
         except queue.Empty:

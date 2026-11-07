@@ -2,6 +2,7 @@ from actors import actors
 import carla
 import queue
 import threading
+import copy
 
 from simulation_manager import SimulationManager
 from simulation_dashboard import SimulationDashboardMonitor
@@ -11,6 +12,7 @@ from vehicle_control import (
 )
 from walker_control import initial_walker_ai_state
 from scenario_management.models import ActorOwnership
+from movement_destination import empty_destination
 
 class DataStorage:
     def __init__(self):
@@ -18,6 +20,7 @@ class DataStorage:
         self.sensors_db = actors.Sensors()
         self.lock = threading.Lock()
         self.sensor_event_queue = queue.Queue()
+        self.actor_event_queue = queue.Queue()
         self.movement_event_queue = queue.Queue()
         self.vehicle_control_states = {}
         self.walker_ai_states = {}
@@ -30,6 +33,8 @@ class DataStorage:
         self.ghost_camera = None
         self.ghost_spawned = False
         self.ghost_physic = None
+        self.ghost_preview_request_id = None
+        self.ghost_preview_requested_enabled = False
         self.world_lib = None
         self.actual_weather_data = None
         self.weather_presets = None
@@ -69,15 +74,48 @@ class DataStorage:
             actor_info.ownership == ActorOwnership.MANAGED
             and actor.type_id.startswith("vehicle.")
         ):
-            self.vehicle_control_states[actor.id] = (
-                initial_vehicle_control_state()
+            state = initial_vehicle_control_state()
+            state["destination"] = empty_destination(
+                actor.id,
+                "vehicle",
+                actor_info.world_id,
             )
+            state["world_id"] = actor_info.world_id
+            self.vehicle_control_states[actor.id] = state
         elif (
             actor_info.ownership == ActorOwnership.MANAGED
             and actor.type_id.startswith("walker.")
         ):
-            self.walker_ai_states[actor.id] = initial_walker_ai_state()
+            state = initial_walker_ai_state()
+            state["destination"] = empty_destination(
+                actor.id,
+                "pedestrian",
+                actor_info.world_id,
+            )
+            self.walker_ai_states[actor.id] = state
         return actor_info
+
+    def get_movement_destination(self, actor_id):
+        actor_id = int(actor_id)
+        with self.lock:
+            state = self.vehicle_control_states.get(actor_id)
+            if state is None:
+                state = self.walker_ai_states.get(actor_id)
+            destination = None if state is None else state.get("destination")
+            return copy.deepcopy(destination)
+
+    def set_movement_destination(self, actor_id, destination):
+        actor_id = int(actor_id)
+        with self.lock:
+            state = self.vehicle_control_states.get(actor_id)
+            if state is None:
+                state = self.walker_ai_states.get(actor_id)
+            if state is None:
+                raise KeyError(
+                    f"Actor {actor_id} has no managed movement state."
+                )
+            state["destination"] = copy.deepcopy(destination)
+            return copy.deepcopy(state["destination"])
 
     def add_sensor(self, sensor: carla.Sensor, parent_id: int, name: str,
                    blueprint_id: str, relative_transform: carla.Transform,
@@ -106,6 +144,20 @@ class DataStorage:
             and sensor_info.ownership == ActorOwnership.MANAGED
         )
 
+    def rename_sensor(self, sensor_id, name):
+        """Change only the application's logical sensor name."""
+        sensor_id = int(sensor_id)
+        normalized_name = str(name).strip()
+        if not normalized_name:
+            raise ValueError("Sensor name cannot be empty.")
+        with self.lock:
+            sensor_info = self.sensors_db.sensors_db.get(sensor_id)
+            if sensor_info is None:
+                raise KeyError(f"Sensor {sensor_id} is no longer available.")
+            sensor_info.user_name = normalized_name
+            sensor_info.data_sources["user_name"] = "gui"
+        return normalized_name
+
     def adopt_runtime_actor(self, actor_id, actor, category, origin):
         """Update the existing synchronized record without replacing actor."""
         actor_id = int(actor_id)
@@ -121,9 +173,14 @@ class DataStorage:
         info.data_sources["adoption"] = "server"
 
         if category == "vehicle":
-            self.vehicle_control_states[actor_id] = (
-                unknown_vehicle_control_state()
+            state = unknown_vehicle_control_state()
+            state["destination"] = empty_destination(
+                actor_id,
+                category,
+                info.world_id,
             )
+            state["world_id"] = info.world_id
+            self.vehicle_control_states[actor_id] = state
         elif category == "pedestrian":
             state = initial_walker_ai_state()
             state.update({
@@ -133,6 +190,11 @@ class DataStorage:
                 ),
                 "state_source": "unknown",
             })
+            state["destination"] = empty_destination(
+                actor_id,
+                category,
+                info.world_id,
+            )
             self.walker_ai_states[actor_id] = state
         return info
 

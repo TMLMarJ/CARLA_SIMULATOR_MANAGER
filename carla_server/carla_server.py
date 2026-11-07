@@ -1,7 +1,11 @@
 import carla
+import math
 import threading
 import queue
 import time
+from carla_pythonapi import load_global_route_planner
+
+GlobalRoutePlanner = None
 from utilities.functions import *
 from simulation_dashboard import SimulationDashboardMonitor
 from simulation_manager import SimulationManager
@@ -26,11 +30,31 @@ from scenario_management.world_cleaner import (
     WorldClearReport,
 )
 from movement_preview import camera_transform_for_actor
+from movement_destination import (
+    DESTINATION_ERROR,
+    MAP_WAYPOINT_DISTANCE_METERS,
+    confirm_destination,
+    destination_result,
+    empty_destination,
+    point_from_location,
+    point_from_values,
+    validate_pedestrian_destination,
+    validate_vehicle_destination,
+)
 from vehicle_control import (
     AUTOPILOT,
+    AUTOPILOT_DESTINATION,
+    AUTOPILOT_FREE_ROAM,
     MANUAL_CONTROL,
     NO_CONTROL,
     VEHICLE_CONTROL_MODES,
+    VEHICLE_STATUS_ARRIVED,
+    VEHICLE_STATUS_CANCELLED,
+    VEHICLE_STATUS_FAILED,
+    VEHICLE_STATUS_IDLE,
+    VEHICLE_STATUS_NAVIGATING,
+    VEHICLE_STATUS_STUCK,
+    normalize_vehicle_control_mode,
 )
 from walker_control import (
     MAX_WALKER_SPEED,
@@ -38,6 +62,16 @@ from walker_control import (
     WALKER_AI_ERROR,
     WALKER_AI_RUNNING,
     WALKER_AI_STOPPED,
+    WALKER_CONTROL_DESTINATION,
+    WALKER_CONTROL_MANUAL,
+    WALKER_CONTROL_MODES,
+    WALKER_CONTROL_RANDOM,
+    WALKER_STATUS_ARRIVED,
+    WALKER_STATUS_CANCELLED,
+    WALKER_STATUS_FAILED,
+    WALKER_STATUS_IDLE,
+    WALKER_STATUS_MOVING,
+    WALKER_STATUS_STUCK,
 )
 
 class CarlaController:
@@ -45,9 +79,33 @@ class CarlaController:
     TRAFFIC_MANAGER_PORT = 8000
     MANUAL_CONTROL_HZ = 20.0
     MANUAL_INPUT_TIMEOUT_SECONDS = 0.5
+    VEHICLE_NAVIGATION_CHECK_INTERVAL_SECONDS = 0.5
+    VEHICLE_NAVIGATION_SAMPLING_RESOLUTION = 2.0
+    VEHICLE_DESTINATION_ARRIVAL_DISTANCE = 3.0
+    VEHICLE_DESTINATION_STOP_DISTANCE = 6.0
+    VEHICLE_DESTINATION_STOP_SPEED = 0.5
+    VEHICLE_DESTINATION_STUCK_SPEED = 0.3
+    VEHICLE_DESTINATION_STUCK_SECONDS = 60.0
+    VEHICLE_DESTINATION_PROGRESS_DISTANCE = 2.0
     WALKER_AI_CHECK_INTERVAL_SECONDS = 0.5
     WALKER_AI_FALLBACK_STALL_SECONDS = 2.0
     WALKER_AI_FALLBACK_LEG_DISTANCE = 4.0
+    WALKER_DESTINATION_ARRIVAL_DISTANCE = 0.6
+    WALKER_DESTINATION_PROGRESS_DISTANCE = 0.05
+    MOVEMENT_WORLD_COMMANDS = frozenset({
+        "start_movement_preview",
+        "set_movement_preview_transform",
+        "set_vehicle_control_mode",
+        "set_walker_ai_enabled",
+        "set_walker_ai_speed",
+        "set_walker_control_mode",
+        "set_walker_manual_control",
+        "validate_movement_destination",
+        "confirm_movement_destination",
+        "clear_movement_destination",
+        "get_movement_destination_map",
+        "get_movement_actor_location",
+    })
 
     def __init__(self, database, controller, host="127.0.0.1", port=2000):
         self.controller = controller
@@ -61,6 +119,7 @@ class CarlaController:
         self.data_ready = False
         self.client = None
         self.world_changed_event = threading.Event()
+        self.world_transition_event = threading.Event()
         self.host = host
         self.port = port
         self.shutdown_request = False
@@ -70,14 +129,18 @@ class CarlaController:
         self.movement_preview_publisher = None
         self.movement_preview_session_id = None
         self.movement_preview_actor_id = None
+        self.movement_preview_world_id = None
         self.movement_control_queue = None
         self.manual_control_command = None
         self.manual_control_received_at = None
         self.manual_control_next_apply = 0.0
         self.manual_control_input_fresh = False
         self.traffic_manager = None
+        self.vehicle_navigation_runtime = {}
         self.walker_ai_controllers = {}
         self.walker_ai_runtime = {}
+        self.map_infrastructure_actor_ids = set()
+        self.map_infrastructure_world_id = None
         self.simulation_manager = SimulationManager()
         self.dashboard_monitor = SimulationDashboardMonitor()
         self.world_synchronizer = WorldSynchronizer()
@@ -152,7 +215,8 @@ class CarlaController:
 
     def _record_actor_operation_result(self, operation, blueprint_id,
                                        actor=None, error=None,
-                                       previous_actor_id=None):
+                                       previous_actor_id=None, request_id=None,
+                                       warnings=None, sensor_id_map=None):
         result = {
             "operation": operation,
             "success": error is None,
@@ -163,10 +227,93 @@ class CarlaController:
             "actor_id": actor.id if actor is not None else None,
             "previous_actor_id": previous_actor_id,
             "error": str(error) if error is not None else None,
+            "request_id": request_id,
+            "warnings": list(warnings or []),
+            "sensor_id_map": dict(sensor_id_map or {}),
         }
         with self.database.lock:
             self.database.actor_operation_result = result
+        actor_event_queue = getattr(self.database, "actor_event_queue", None)
+        if actor_event_queue is not None:
+            actor_event_queue.put(("actor_operation_result", result))
         return result
+
+    @staticmethod
+    def _physics_value(value):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return value
+
+    @classmethod
+    def _physics_snapshot(cls, physics):
+        scalar_fields = (
+            "max_rpm", "moi", "damping_rate_full_throttle",
+            "damping_rate_zero_throttle_clutch_engaged",
+            "damping_rate_zero_throttle_clutch_disengaged",
+            "use_gear_autobox", "gear_switch_time", "clutch_strength",
+            "final_ratio", "mass", "drag_coefficient",
+            "use_sweep_wheel_collision",
+        )
+        snapshot = {
+            name: cls._physics_value(getattr(physics, name, None))
+            for name in scalar_fields
+        }
+        center = getattr(physics, "center_of_mass", None)
+        snapshot["center_of_mass"] = tuple(
+            cls._physics_value(getattr(center, axis, None))
+            for axis in ("x", "y", "z")
+        )
+        for name in ("torque_curve", "steering_curve"):
+            snapshot[name] = [
+                (cls._physics_value(point.x), cls._physics_value(point.y))
+                for point in getattr(physics, name, [])
+            ]
+        snapshot["forward_gears"] = [
+            tuple(cls._physics_value(getattr(gear, name, None)) for name in (
+                "ratio", "down_ratio", "up_ratio"
+            ))
+            for gear in getattr(physics, "forward_gears", [])
+        ]
+        snapshot["wheels"] = [
+            tuple(cls._physics_value(getattr(wheel, name, None)) for name in (
+                "tire_friction", "damping_rate", "max_steer_angle",
+                "radius", "max_brake_torque", "max_handbrake_torque",
+            ))
+            for wheel in getattr(physics, "wheels", [])
+        ]
+        return snapshot
+
+    @classmethod
+    def _physics_mismatches(cls, requested, actual, tolerance=1e-3):
+        requested_snapshot = cls._physics_snapshot(requested)
+        actual_snapshot = cls._physics_snapshot(actual)
+
+        def equal(left, right):
+            if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+                return abs(float(left) - float(right)) <= tolerance
+            if isinstance(left, (list, tuple)) and isinstance(right, (list, tuple)):
+                return len(left) == len(right) and all(
+                    equal(a, b) for a, b in zip(left, right)
+                )
+            return left == right
+
+        return [
+            name for name, value in requested_snapshot.items()
+            if not equal(value, actual_snapshot.get(name))
+        ]
+
+    @classmethod
+    def _apply_vehicle_physics_checked(cls, actor, physics):
+        actor.apply_physics_control(physics)
+        actual = actor.get_physics_control()
+        mismatches = cls._physics_mismatches(physics, actual)
+        if mismatches:
+            raise RuntimeError(
+                "CARLA returned different physics values for: "
+                + ", ".join(mismatches)
+            )
+        return actual
 
     def run(self):
         try:
@@ -259,6 +406,9 @@ class CarlaController:
             )
             cmd, data = self._get_next_command(queue_timeout)
 
+            if self._movement_command_is_stale(cmd, data, world):
+                continue
+
             if cmd == "shutdown":
                 print("DEBUG: SHUTDOWN COMMAND RECEIVED")
                 self.simulation_manager.disconnect()
@@ -269,7 +419,15 @@ class CarlaController:
             if cmd == "spawn":
                 requested_blueprint_id = str(data["blueprint_id"])
                 transform = data["transform"]
-                blueprint_attributes = self.database.blueprint_new_data
+                request_id = data.get("request_id")
+                blueprint_attributes = data.get(
+                    "attributes",
+                    self.database.blueprint_new_data,
+                )
+                requested_physics = data.get(
+                    "physics",
+                    self.database.ghost_physic,
+                )
                 self.database.blueprint_new_data = None
                 actor = None
                 try:
@@ -280,19 +438,25 @@ class CarlaController:
                         transform,
                         attributes=blueprint_attributes,
                     )
-                    if self.database.ghost_physic is not None:
-                        actor.apply_physics_control(self.database.ghost_physic)
-                    spectator = world.get_spectator()
-
-                    transform = actor.get_transform()
-                    spectator.set_transform(transform)
+                    actual_physics = None
+                    if (
+                        requested_physics is not None
+                        and actor.type_id.startswith("vehicle.")
+                    ):
+                        actual_physics = self._apply_vehicle_physics_checked(
+                            actor,
+                            requested_physics,
+                        )
                     with self.database.lock:
-                        self.database.add_actor(actor, data["name"])
+                        actor_info = self.database.add_actor(actor, data["name"])
+                        if actual_physics is not None:
+                            actor_info.physics_control = actual_physics
                         self.database.spawned_actor_id = actor.id
                     self._record_actor_operation_result(
                         "spawn",
                         requested_blueprint_id,
                         actor=actor,
+                        request_id=request_id,
                     )
                 except Exception as error:
                     if actor is not None:
@@ -309,9 +473,11 @@ class CarlaController:
                         "spawn",
                         requested_blueprint_id,
                         error=error,
+                        request_id=request_id,
                     )
 
             if cmd == "change_world":
+                self.world_transition_event.set()
                 self._shutdown_vehicle_controls(disable_autopilot=True)
                 self._shutdown_walker_ai()
                 self.cleanup_movement_preview("world_changed")
@@ -359,6 +525,7 @@ class CarlaController:
                     new_blueprint_library = new_world.get_blueprint_library()
                     world = new_world
                     blueprint_library = new_blueprint_library
+                    self._capture_map_infrastructure(new_world)
 
                     self.cleanup_sensor_previews()
                     self.cleanup_preview()
@@ -423,12 +590,34 @@ class CarlaController:
                     ))
                     self._publish_simulation_control_state(force=True)
                 except Exception as e:
-                    self.database.world_change_error = str(e)
+                    error_message = str(e)
+                    try:
+                        (
+                            world,
+                            blueprint_library,
+                            episode_changed,
+                        ) = self._recover_world_after_failed_change(world)
+                        recovery_state = (
+                            "CARLA switched to a different world episode; "
+                            "local references were rebuilt."
+                            if episode_changed else
+                            "The previous world episode is still active and "
+                            "was synchronized."
+                        )
+                        error_message = f"{error_message} {recovery_state}"
+                    except Exception as recovery_error:
+                        self.dashboard_monitor.record_error(recovery_error)
+                        error_message = (
+                            f"{error_message} Server state recovery failed: "
+                            f"{recovery_error}"
+                        )
+                    self.database.world_change_error = error_message
                     self.dashboard_monitor.record_error(e)
-                    print(f"Error changing map: {e}")
+                    print(f"Error changing map: {error_message}")
                 finally:
                     self.client.set_timeout(5.0)
                     self.world_changed_event.set()
+                    self.world_transition_event.clear()
 
             if cmd == "change_weather":
                 world = self.client.get_world()
@@ -868,6 +1057,11 @@ class CarlaController:
                     self._finish_clear_operation()
 
             if cmd == "spawn_preview_actor":
+                if not self._ghost_preview_request_is_current(
+                    data.get("request_id"),
+                    enabled=True,
+                ):
+                    continue
                 # A preview can be requested more than once by GUI events. Always
                 # remove the previous actor and camera before creating a new pair.
                 self.cleanup_preview()
@@ -893,6 +1087,12 @@ class CarlaController:
                     actor = world.try_spawn_actor(bp, transform)
 
                 if actor is not None:
+                    if not self._ghost_preview_request_is_current(
+                        data.get("request_id"),
+                        enabled=True,
+                    ):
+                        actor.destroy()
+                        continue
                     self.database.ghost_data = actor
                     if actor.type_id.startswith("vehicle."):
                         self.database.ghost_physic = actor.get_physics_control()
@@ -921,7 +1121,13 @@ class CarlaController:
                     self.database.ghost_camera = self.client.get_world().spawn_actor(camera_bp, camera_transform)
 
                     self.database.ghost_camera.listen(data["image_callback"])
-                    self.database.ghost_spawned = True
+                    if self._ghost_preview_request_is_current(
+                        data.get("request_id"),
+                        enabled=True,
+                    ):
+                        self.database.ghost_spawned = True
+                    else:
+                        self.cleanup_preview()
 
             if cmd == "set_ghost_transform":
                 transform = data
@@ -948,15 +1154,7 @@ class CarlaController:
                         self.database.ghost_camera = camera
 
             if cmd == "destroy_preview_actor":
-                if self.database.ghost_camera is not None:
-                    self.database.ghost_camera.stop()
-                    self.database.ghost_camera.destroy()
-                    self.database.ghost_camera = None
-
-                if self.database.ghost_data is not None:
-                    self.database.ghost_data.destroy()
-                    self.database.ghost_physic = None
-                    self.database.ghost_data = None
+                self.cleanup_preview()
 
             if cmd == "update_preview_actor_model":
                 if self.database.ghost_data is not None:
@@ -975,6 +1173,13 @@ class CarlaController:
                                 print("AFTER: ", attr_name, bp.get_attribute(attr_name))
                     new_ghost_actor = world.try_spawn_actor(bp, transform)
                     if new_ghost_actor is not None:
+                        if (
+                            self.database.ghost_physic is not None
+                            and new_ghost_actor.type_id.startswith("vehicle.")
+                        ):
+                            new_ghost_actor.apply_physics_control(
+                                self.database.ghost_physic
+                            )
                         new_ghost_actor.set_simulate_physics(False)
                         new_ghost_actor.set_enable_gravity(False)
                         self.database.ghost_data = new_ghost_actor
@@ -1005,22 +1210,123 @@ class CarlaController:
             if cmd == "apply_new_physics_and_blueprint_to_ghost":
                 self.database.physics_applied = False
                 physics_control = data
-                if self.database.ghost_data is not None:
+                try:
+                    if self.database.ghost_data is None:
+                        raise RuntimeError("Preview actor is no longer available.")
                     ghost_actor = self.database.ghost_data
                     if physics_control is not None:
                         ghost_actor.apply_physics_control(physics_control)
+                        self.database.ghost_physic = physics_control
                     ghost_type = ghost_actor.type_id
                     self.command_queue.put(("update_preview_actor_model", ghost_type))
                     self.database.physics_applied = True
+                    result = {"success": True}
+                except Exception as error:
+                    self.dashboard_monitor.record_error(error)
+                    result = {"success": False, "error": str(error)}
+                self.database.actor_event_queue.put((
+                    "ghost_configuration_applied",
+                    result,
+                ))
+
+            if cmd == "get_vehicle_edit_data":
+                actor_id = int(data["actor_id"])
+                request_id = data.get("request_id")
+                try:
+                    with self.database.lock:
+                        actor = self.database.actors_db.actors.get(actor_id)
+                        actor_info = self.database.actors_db.actors_db.get(actor_id)
+                    if actor is None or actor_info is None or not actor.is_alive:
+                        raise RuntimeError("Vehicle is no longer available.")
+                    if not actor.type_id.startswith("vehicle."):
+                        raise RuntimeError("Selected actor is not a vehicle.")
+                    physics = actor.get_physics_control()
+                    attributes = {
+                        str(name): str(value)
+                        for name, value in dict(actor.attributes or {}).items()
+                    }
+                    with self.database.lock:
+                        actor_info.physics_control = physics
+                        actor_info.blueprint_attributes = dict(attributes)
+                    self.database.actor_event_queue.put((
+                        "vehicle_edit_data",
+                        {
+                            "success": True,
+                            "request_id": request_id,
+                            "actor_id": actor_id,
+                            "blueprint_id": actor.type_id,
+                            "attributes": attributes,
+                            "physics": physics,
+                        },
+                    ))
+                except Exception as error:
+                    self.database.actor_event_queue.put((
+                        "vehicle_edit_data",
+                        {
+                            "success": False,
+                            "request_id": request_id,
+                            "actor_id": actor_id,
+                            "error": str(error),
+                        },
+                    ))
+
+            if cmd == "apply_vehicle_physics":
+                actor_id = int(data["actor_id"])
+                request_id = data.get("request_id")
+                try:
+                    with self.database.lock:
+                        actor = self.database.actors_db.actors.get(actor_id)
+                        actor_info = self.database.actors_db.actors_db.get(actor_id)
+                    if actor is None or actor_info is None or not actor.is_alive:
+                        raise RuntimeError("Vehicle is no longer available.")
+                    actual = self._apply_vehicle_physics_checked(
+                        actor,
+                        data["physics"],
+                    )
+                    with self.database.lock:
+                        actor_info.physics_control = actual
+                        actor_info.update_runtime(actor)
+                    self.database.actor_event_queue.put((
+                        "vehicle_physics_applied",
+                        {
+                            "success": True,
+                            "request_id": request_id,
+                            "actor_id": actor_id,
+                        },
+                    ))
+                except Exception as error:
+                    self.dashboard_monitor.record_error(error)
+                    self.database.actor_event_queue.put((
+                        "vehicle_physics_applied",
+                        {
+                            "success": False,
+                            "request_id": request_id,
+                            "actor_id": actor_id,
+                            "error": str(error),
+                        },
+                    ))
 
             if cmd == "change_actor_model":
-                blueprint_id, actor_id = data
+                if isinstance(data, dict):
+                    blueprint_id = data["blueprint_id"]
+                    actor_id = data["actor_id"]
+                    blueprint_attributes = data.get("attributes")
+                    requested_physics = data.get("physics")
+                    request_id = data.get("request_id")
+                else:
+                    blueprint_id, actor_id = data
+                    blueprint_attributes = None
+                    requested_physics = None
+                    request_id = None
                 requested_blueprint_id = str(blueprint_id)
                 actor_id = int(actor_id)
                 old_actor = None
                 new_actor = None
+                new_sensors = []
+                old_actor_removed = False
+                warnings = []
+                sensor_id_map = {}
                 try:
-                    # Validate the requested ID before destroying the old actor.
                     self._find_blueprint_checked(
                         blueprint_library,
                         requested_blueprint_id,
@@ -1037,15 +1343,6 @@ class CarlaController:
                             f"Actor {actor_id} is no longer available."
                         )
 
-                    if actor_id == self.movement_preview_actor_id:
-                        self.cleanup_movement_preview("actor_replaced")
-                    self._destroy_walker_ai(actor_id, remove_state=True)
-                    self._release_vehicle_control(
-                        actor_id,
-                        disable_autopilot=True,
-                    )
-                    self.remove_sensors_for_parent(actor_id)
-
                     transform = old_actor.get_transform()
                     name = actor_info.user_name
                     preserved_metadata = {
@@ -1060,55 +1357,173 @@ class CarlaController:
                         "parent_scenario_id": actor_info.parent_scenario_id,
                         "data_sources": dict(actor_info.data_sources),
                     }
-                    physics = (
+                    preserved_physics = (
                         old_actor.get_physics_control()
                         if old_actor.type_id.startswith("vehicle.")
                         else None
                     )
-                    old_actor.destroy()
-                    is_destroyed = wait_and_try(
-                        lambda: not old_actor.is_alive,
-                        timeout=5,
-                        interval=0.5,
+                    with self.database.lock:
+                        attached_sensors = [
+                            (
+                                sensor_id,
+                                self.database.sensors_db.sensors.get(sensor_id),
+                                sensor_info,
+                            )
+                            for sensor_id, sensor_info
+                            in self.database.sensors_db.sensors_db.items()
+                            if sensor_info.parent_id == actor_id
+                        ]
+
+                    transform.location.z += 0.5
+                    if actor_id == self.movement_preview_actor_id:
+                        self.cleanup_movement_preview("actor_replaced")
+                    self._destroy_walker_ai(actor_id, remove_state=True)
+                    self._release_vehicle_control(
+                        actor_id,
+                        disable_autopilot=True,
                     )
-                    if not is_destroyed:
+                    for old_sensor_id, old_sensor, _ in attached_sensors:
+                        self.stop_sensor_preview_actor(old_sensor_id)
+                        try:
+                            if old_sensor is not None and old_sensor.is_alive:
+                                old_sensor.destroy()
+                        except Exception as sensor_error:
+                            warnings.append(
+                                f"Old sensor {old_sensor_id} cleanup failed: "
+                                f"{sensor_error}"
+                            )
+
+                    old_actor.destroy()
+                    try:
+                        old_actor_alive = bool(old_actor.is_alive)
+                    except RuntimeError:
+                        old_actor_alive = False
+                    if old_actor_alive:
                         raise RuntimeError(
                             f"Failed to destroy actor {actor_id}."
                         )
-
+                    old_actor_removed = True
                     with self.database.lock:
-                        self.database.actors_db.actors.pop(actor_id, None)
-                        self.database.actors_db.actors_db.pop(actor_id, None)
-                        self.database.vehicle_control_states.pop(
-                            actor_id,
-                            None,
-                        )
+                        self.database.actors_db.remove_actor(actor_id)
+                        self.database.vehicle_control_states.pop(actor_id, None)
                         self.database.walker_ai_states.pop(actor_id, None)
+                        for old_sensor_id, _, _ in attached_sensors:
+                            self.database.sensors_db.remove_sensor(old_sensor_id)
 
-                    transform.location.z += 0.5
                     new_actor = self._spawn_actor_checked(
                         world,
                         blueprint_library,
                         requested_blueprint_id,
                         transform,
                         try_spawn=False,
+                        attributes=blueprint_attributes,
                     )
-                    if physics is not None:
-                        new_actor.apply_physics_control(physics)
+                    physics = (
+                        requested_physics
+                        if requested_physics is not None
+                        else preserved_physics
+                    )
+                    actual_physics = None
+                    if physics is not None and new_actor.type_id.startswith("vehicle."):
+                        try:
+                            actual_physics = self._apply_vehicle_physics_checked(
+                                new_actor,
+                                physics,
+                            )
+                        except Exception as physics_error:
+                            actual_physics = new_actor.get_physics_control()
+                            warnings.append(
+                                "Physics from the previous vehicle was incompatible "
+                                "with the selected model; CARLA defaults were kept: "
+                                f"{physics_error}"
+                            )
+
+                    for old_sensor_id, old_sensor, sensor_info in attached_sensors:
+                        sensor_blueprint = self._find_blueprint_checked(
+                            blueprint_library,
+                            sensor_info.blueprint_id,
+                        )
+                        for attribute_name, attribute_value in (
+                            sensor_info.blueprint_attributes.items()
+                        ):
+                            if sensor_blueprint.has_attribute(attribute_name):
+                                attribute = sensor_blueprint.get_attribute(attribute_name)
+                                if attribute.is_modifiable:
+                                    sensor_blueprint.set_attribute(
+                                        attribute_name,
+                                        str(attribute_value),
+                                    )
+                        attachment = getattr(
+                            carla.AttachmentType,
+                            str(sensor_info.attachment_type),
+                            carla.AttachmentType.Rigid,
+                        )
+                        new_sensor = world.spawn_actor(
+                            sensor_blueprint,
+                            sensor_info.relative_transform,
+                            attach_to=new_actor,
+                            attachment_type=attachment,
+                        )
+                        if new_sensor is None:
+                            raise RuntimeError(
+                                f"Could not restore attached sensor {old_sensor_id}."
+                            )
+                        new_sensors.append((
+                            old_sensor_id,
+                            old_sensor,
+                            new_sensor,
+                            sensor_info,
+                        ))
+
                     with self.database.lock:
-                        self.database.add_actor(
+                        new_actor_info = self.database.add_actor(
                             new_actor,
                             name,
                             **preserved_metadata,
                         )
+                        if actual_physics is not None:
+                            new_actor_info.physics_control = actual_physics
+                        for old_sensor_id, _, new_sensor, sensor_info in new_sensors:
+                            self.database.add_sensor(
+                                new_sensor,
+                                new_actor.id,
+                                sensor_info.user_name,
+                                sensor_info.blueprint_id,
+                                sensor_info.relative_transform,
+                                sensor_info.blueprint_attributes,
+                                scenario_id=sensor_info.scenario_id,
+                                ownership=sensor_info.ownership,
+                                origin=sensor_info.origin,
+                                configuration_status=sensor_info.configuration_status,
+                                missing_fields=list(sensor_info.missing_fields),
+                                warnings=list(sensor_info.warnings),
+                                parent_scenario_id=sensor_info.parent_scenario_id,
+                                attachment_type=sensor_info.attachment_type,
+                                data_sources=dict(sensor_info.data_sources),
+                            )
+                            sensor_id_map[old_sensor_id] = new_sensor.id
                         self.database.spawned_actor_id = new_actor.id
+                    if sensor_id_map:
+                        self.database.sensor_event_queue.put((
+                            "sensors_replaced",
+                            sensor_id_map,
+                        ))
                     self._record_actor_operation_result(
                         "change_model",
                         requested_blueprint_id,
                         actor=new_actor,
                         previous_actor_id=actor_id,
+                        request_id=request_id,
+                        warnings=warnings,
+                        sensor_id_map=sensor_id_map,
                     )
                 except Exception as error:
+                    for _, _, new_sensor, _ in new_sensors:
+                        try:
+                            if new_sensor.is_alive:
+                                new_sensor.destroy()
+                        except Exception:
+                            pass
                     if new_actor is not None:
                         with self.database.lock:
                             new_actor_is_registered = (
@@ -1120,11 +1535,17 @@ class CarlaController:
                             and getattr(new_actor, "is_alive", False)
                         ):
                             new_actor.destroy()
+                    if old_actor_removed:
+                        error = RuntimeError(
+                            "The previous actor was removed, but the new model "
+                            f"could not be spawned: {error}"
+                        )
                     self._record_actor_operation_result(
                         "change_model",
                         requested_blueprint_id,
                         error=error,
                         previous_actor_id=actor_id,
+                        request_id=request_id,
                     )
 
             if cmd == "set_actor_transform":
@@ -1182,7 +1603,7 @@ class CarlaController:
                     self.database.sensor_event_queue.put(("sensor_error", f"Could not add sensor: {e}"))
 
             if cmd == "remove_sensor":
-                sensor_id = data
+                sensor_id = int(data)
                 try:
                     self.stop_sensor_preview_actor(sensor_id)
                     with self.database.lock:
@@ -1282,12 +1703,35 @@ class CarlaController:
             if cmd == "set_walker_ai_speed":
                 self._set_walker_ai_speed(data)
 
-            self._service_manual_vehicle_control()
+            if cmd == "set_walker_control_mode":
+                self._set_walker_control_mode(world, data)
+
+            if cmd == "set_walker_manual_control":
+                self._set_walker_manual_control(data)
+
+            if cmd == "validate_movement_destination":
+                self._validate_movement_destination(world, data)
+
+            if cmd == "confirm_movement_destination":
+                self._confirm_movement_destination(world, data)
+
+            if cmd == "clear_movement_destination":
+                self._clear_movement_destination(world, data)
+
+            if cmd == "get_movement_destination_map":
+                self._get_movement_destination_map(world, data)
+
+            if cmd == "get_movement_actor_location":
+                self._get_movement_actor_location(data)
+
+            if not self.world_transition_event.is_set():
+                self._service_manual_vehicle_control()
 
             world_snapshot = None
             if self.running and cmd != "stop_simulation_control":
                 world_snapshot = self._service_simulation(world)
-            if self.running:
+            if self.running and not self.world_transition_event.is_set():
+                self._service_vehicle_navigation(world, world_snapshot)
                 self._service_walker_ai(world, world_snapshot)
             if self.running:
                 self._service_dashboard(world, world_snapshot=world_snapshot)
@@ -1366,6 +1810,107 @@ class CarlaController:
             return self.command_queue.get(timeout=timeout)
         except queue.Empty:
             return None, None
+
+    @staticmethod
+    def _world_id(world):
+        try:
+            return int(world.id)
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            return None
+
+    def _movement_command_is_stale(self, command, data, world):
+        if command not in self.MOVEMENT_WORLD_COMMANDS:
+            return False
+        transition = getattr(self, "world_transition_event", None)
+        if transition is not None and transition.is_set():
+            return True
+        if not isinstance(data, dict):
+            return True
+        command_world_id = data.get("world_id")
+        current_world_id = self._world_id(world)
+        if command_world_id is None or current_world_id is None:
+            return False
+        try:
+            return int(command_world_id) != current_world_id
+        except (TypeError, ValueError):
+            return True
+
+    def _movement_world_id(self):
+        with self.database.lock:
+            world = getattr(self.database, "world", None)
+        return self._world_id(world)
+
+    def _queue_movement_command(self, command, data):
+        transition = getattr(self, "world_transition_event", None)
+        if transition is not None and transition.is_set():
+            return False
+        world_id = self._movement_world_id()
+        if world_id is None:
+            return False
+        payload = dict(data)
+        payload["world_id"] = world_id
+        if transition is not None and transition.is_set():
+            return False
+        self.command_queue.put((command, payload))
+        return True
+
+    def _recover_world_after_failed_change(self, previous_world):
+        current_world = self.client.get_world()
+        current_world_id = self._world_id(current_world)
+        if current_world_id is None:
+            raise RuntimeError(
+                "CARLA returned a world without a valid episode ID."
+            )
+        previous_world_id = self._world_id(previous_world)
+        blueprint_library = current_world.get_blueprint_library()
+        episode_changed = current_world_id != previous_world_id
+        if episode_changed:
+            self._capture_map_infrastructure(current_world)
+
+        if episode_changed:
+            self.cleanup_sensor_previews()
+            self.cleanup_preview()
+            self.sensor_status_errors.clear()
+            with self.database.lock:
+                self.database.actors_db.clear()
+                self.database.sensors_db.clear()
+                self.database.vehicle_control_states.clear()
+                self.database.walker_ai_states.clear()
+                self.database.spawned_actor_id = None
+            self.database.sensor_event_queue.put(("sensors_cleared", None))
+
+        settings = self.simulation_manager.get_current_settings(current_world)
+        self.simulation_manager.settings_changed(
+            settings,
+            preserve_activity=False,
+        )
+        with self.database.lock:
+            self.database.world = current_world
+            self.database.blueprint_lib = blueprint_library
+            self.database.pedestrian_blueprint_ids = (
+                get_pedestrian_blueprint_ids(blueprint_library)
+            )
+            self.database.world_lib = self.client.get_available_maps()
+            self.database.actual_weather_data = parse_weather_to_dict(
+                current_world.get_weather()
+            )
+            self.database.available_spawn_points = (
+                current_world.get_map().get_spawn_points()
+            )
+            self.database.actual_simulation_settings = settings
+            self.database.proposed_simulation_settings = settings.copy()
+
+        self.dashboard_monitor.reset_world(
+            self.database,
+            current_world,
+            "World change recovery",
+        )
+        self._perform_world_sync(
+            current_world,
+            reason="map_change_recovery",
+        )
+        self._publish_simulation_control_state(force=True)
+        return current_world, blueprint_library, episode_changed
 
     def _service_simulation(self, world):
         if self.simulation_manager.state == SimulationManager.ERROR:
@@ -1447,7 +1992,32 @@ class CarlaController:
             force=force,
         )
 
-    def _collect_internal_actor_ids(self):
+    def _capture_map_infrastructure(self, world):
+        world_id = self._world_id(world)
+        actor_ids = set()
+        try:
+            actors = list(world.get_actors())
+        except (AttributeError, RuntimeError, TypeError):
+            actors = []
+        for actor in actors:
+            try:
+                if str(actor.type_id).startswith("static."):
+                    actor_ids.add(int(actor.id))
+            except (AttributeError, RuntimeError, TypeError, ValueError):
+                continue
+        self.map_infrastructure_actor_ids = actor_ids
+        self.map_infrastructure_world_id = world_id
+        return set(actor_ids)
+
+    def _map_infrastructure_ids(self, world=None):
+        if world is not None and (
+            getattr(self, "map_infrastructure_world_id", None)
+            != self._world_id(world)
+        ):
+            return set()
+        return set(getattr(self, "map_infrastructure_actor_ids", set()))
+
+    def _collect_internal_actor_ids(self, include_map_infrastructure=True):
         internal_actor_ids = set()
         for actor in (
             self.database.ghost_data,
@@ -1473,14 +2043,19 @@ class CarlaController:
             controller_id = self._actor_id(walker_controller)
             if controller_id is not None:
                 internal_actor_ids.add(controller_id)
+        if include_map_infrastructure:
+            internal_actor_ids.update(self._map_infrastructure_ids())
         return internal_actor_ids
 
     def _perform_world_sync(self, world, reason, publish=True):
         report = self.world_synchronizer.synchronize(
             world,
             self.database,
-            self._collect_internal_actor_ids(),
+            self._collect_internal_actor_ids(
+                include_map_infrastructure=False,
+            ),
             reason=reason,
+            infrastructure_actor_ids=self._map_infrastructure_ids(world),
         )
         if self.movement_preview_actor_id in report.removed_actor_ids:
             self.cleanup_movement_preview("actor_removed_externally")
@@ -1521,6 +2096,7 @@ class CarlaController:
                     f"CARLA did not load target map '{target_map}'."
                 )
             new_library = new_world.get_blueprint_library()
+            self._capture_map_infrastructure(new_world)
             settings = self.simulation_manager.get_current_settings(new_world)
             self.simulation_manager.settings_changed(
                 settings,
@@ -1615,8 +2191,10 @@ class CarlaController:
                     actor.set_autopilot(True, port)
                     with self.database.lock:
                         self.database.vehicle_control_states[actor_id].update({
-                            "mode": AUTOPILOT,
-                            "status": f"Autopilot active (port {port}).",
+                            "mode": AUTOPILOT_FREE_ROAM,
+                            "control_mode": AUTOPILOT_FREE_ROAM,
+                            "status": f"Autopilot Free Roam active (port {port}).",
+                            "navigation_status": VEHICLE_STATUS_IDLE,
                             "autopilot_enabled": True,
                             "autopilot_state_source": "file",
                             "traffic_manager_port": port,
@@ -1625,6 +2203,7 @@ class CarlaController:
                 with self.database.lock:
                     self.database.vehicle_control_states[actor_id].update({
                         "mode": MANUAL_CONTROL,
+                        "control_mode": MANUAL_CONTROL,
                         "status": (
                             "Manual Control restored; open Movement Control "
                             "to provide input."
@@ -1848,6 +2427,18 @@ class CarlaController:
         self.database.ghost_physic = None
         self.database.ghost_spawned = False
 
+    def _ghost_preview_request_is_current(self, request_id, enabled):
+        transition = getattr(self, "world_transition_event", None)
+        if enabled and transition is not None and transition.is_set():
+            return False
+        with self.database.lock:
+            return (
+                request_id is not None
+                and request_id == self.database.ghost_preview_request_id
+                and bool(self.database.ghost_preview_requested_enabled)
+                == bool(enabled)
+            )
+
     def remove_sensors_for_parent(self, parent_id):
         sensor_ids = [
             sensor_id
@@ -1900,10 +2491,13 @@ class CarlaController:
             return
         if session_id is None and actor_id == self.movement_preview_actor_id:
             session_id = self.movement_preview_session_id
+        if session_id is None:
+            return
         status = "vehicle_control_error" if error else "vehicle_control_state"
         self.database.movement_event_queue.put((status, {
             "session_id": session_id,
             "actor_id": actor_id,
+            "world_id": self._movement_world_id(),
             "control_state": state,
             "message": str(error) if error else None,
         }))
@@ -1951,10 +2545,333 @@ class CarlaController:
             manual_gear_shift=False,
         ))
 
+    @staticmethod
+    def _vehicle_xy_distance(first, second):
+        return math.hypot(
+            float(first.x) - float(second.x),
+            float(first.y) - float(second.y),
+        )
+
+    @staticmethod
+    def _vehicle_speed(actor):
+        velocity = actor.get_velocity()
+        return math.sqrt(
+            float(velocity.x) ** 2
+            + float(velocity.y) ** 2
+            + float(velocity.z) ** 2
+        )
+
+    def _vehicle_destination_for_world(self, actor_id, world):
+        with self.database.lock:
+            state = self.database.vehicle_control_states.get(actor_id)
+            destination = None if state is None else state.get("destination")
+            state_world_id = None if state is None else state.get("world_id")
+        if not isinstance(destination, dict) or not destination.get("confirmed"):
+            raise RuntimeError("Confirm a valid Destination before starting navigation.")
+        world_id = self._world_id(world)
+        destination_world_id = destination.get("world_id")
+        destination_actor_id = destination.get("actor_id")
+        try:
+            state_world_id = int(state_world_id)
+            destination_world_id = int(destination_world_id)
+            destination_actor_id = int(destination_actor_id)
+        except (TypeError, ValueError) as error:
+            raise RuntimeError(
+                "The selected Destination has invalid actor or world metadata."
+            ) from error
+        if (
+            world_id is None
+            or state_world_id != world_id
+            or destination_world_id != world_id
+            or destination_actor_id != actor_id
+        ):
+            raise RuntimeError(
+                "The selected Destination belongs to a different actor or world."
+            )
+        selected = destination.get("selected")
+        if not isinstance(selected, dict):
+            raise RuntimeError("The confirmed Destination has no usable point.")
+        try:
+            return carla.Location(
+                x=float(selected["x"]),
+                y=float(selected["y"]),
+                z=float(selected["z"]),
+            ), destination
+        except (KeyError, TypeError, ValueError) as error:
+            raise RuntimeError("The confirmed Destination coordinates are invalid.") from error
+
+    def _plan_vehicle_route(self, world, actor, destination_location):
+        global GlobalRoutePlanner
+        if GlobalRoutePlanner is None:
+            GlobalRoutePlanner, planner_error = load_global_route_planner()
+            if GlobalRoutePlanner is None:
+                raise RuntimeError(planner_error)
+        carla_map = world.get_map()
+        lane_type = getattr(carla.LaneType, "Driving", carla.LaneType.Any)
+        start_waypoint = carla_map.get_waypoint(
+            actor.get_location(),
+            project_to_road=True,
+            lane_type=lane_type,
+        )
+        target_waypoint = carla_map.get_waypoint(
+            destination_location,
+            project_to_road=True,
+            lane_type=lane_type,
+        )
+        if start_waypoint is None or target_waypoint is None:
+            raise RuntimeError("No driving lane is available near the vehicle or Destination.")
+
+        planner = GlobalRoutePlanner(
+            carla_map,
+            self.VEHICLE_NAVIGATION_SAMPLING_RESOLUTION,
+        )
+        traced_route = planner.trace_route(
+            start_waypoint.transform.location,
+            target_waypoint.transform.location,
+        )
+        if not traced_route:
+            raise RuntimeError("GlobalRoutePlanner could not find a driveable route.")
+
+        path = []
+        for route_item in traced_route:
+            waypoint = route_item[0] if isinstance(route_item, (tuple, list)) else route_item
+            location = waypoint.transform.location
+            point = carla.Location(
+                x=float(location.x),
+                y=float(location.y),
+                z=float(location.z),
+            )
+            if not path or self._vehicle_xy_distance(path[-1], point) > 0.05:
+                path.append(point)
+        if len(path) < 2:
+            raise RuntimeError("The planned route does not contain enough waypoints.")
+        return path, target_waypoint.transform.location
+
+    def _clear_vehicle_navigation_path(self, actor):
+        if self.traffic_manager is None:
+            return
+        try:
+            self.traffic_manager.set_path(actor, [], True)
+        except Exception as error:
+            self.dashboard_monitor.record_error(error)
+
+    def _cancel_vehicle_navigation(self, actor_id, actor=None,
+                                   status=VEHICLE_STATUS_CANCELLED,
+                                   stop_vehicle=False):
+        runtime_store = getattr(self, "vehicle_navigation_runtime", None)
+        if runtime_store is None:
+            runtime_store = {}
+            self.vehicle_navigation_runtime = runtime_store
+        runtime = runtime_store.pop(actor_id, None)
+        if actor is not None and getattr(actor, "is_alive", False):
+            self._clear_vehicle_navigation_path(actor)
+            if stop_vehicle:
+                actor.set_autopilot(False, self.TRAFFIC_MANAGER_PORT)
+                self._safe_stop_vehicle(actor)
+        with self.database.lock:
+            state = self.database.vehicle_control_states.get(actor_id)
+            if state is not None:
+                state.update({
+                    "navigation_status": status,
+                    "route": None,
+                    "distance_to_destination": (
+                        state.get("distance_to_destination")
+                        if runtime is not None else None
+                    ),
+                })
+
+    def _activate_vehicle_destination(self, world, actor, actor_id,
+                                      destination_location, destination,
+                                      path, route_target):
+        traffic_manager = self._ensure_traffic_manager(world)
+        traffic_manager.set_path(actor, path, True)
+        actor.set_autopilot(True, self.TRAFFIC_MANAGER_PORT)
+        current_location = actor.get_location()
+        distance = self._vehicle_xy_distance(current_location, route_target)
+        world_id = self._world_id(world)
+        now = time.monotonic()
+        runtime_store = getattr(self, "vehicle_navigation_runtime", None)
+        if runtime_store is None:
+            runtime_store = {}
+            self.vehicle_navigation_runtime = runtime_store
+        runtime_store[actor_id] = {
+            "world_id": world_id,
+            "destination": carla.Location(
+                x=float(route_target.x),
+                y=float(route_target.y),
+                z=float(route_target.z),
+            ),
+            "route": path,
+            "next_check": 0.0,
+            "last_location": current_location,
+            "last_progress_time": now,
+            "last_frame": None,
+            "arrival_braking": False,
+        }
+        with self.database.lock:
+            state = self.database.vehicle_control_states[actor_id]
+            state.update({
+                "mode": AUTOPILOT_DESTINATION,
+                "control_mode": AUTOPILOT_DESTINATION,
+                "status": "Destination navigation is active.",
+                "navigation_status": VEHICLE_STATUS_NAVIGATING,
+                "destination": destination,
+                "route": {
+                    "waypoint_count": len(path),
+                    "sampling_resolution": self.VEHICLE_NAVIGATION_SAMPLING_RESOLUTION,
+                },
+                "distance_to_destination": distance,
+                "current_speed": self._vehicle_speed(actor),
+                "world_id": world_id,
+                "autopilot_enabled": True,
+                "autopilot_state_source": "local",
+                "traffic_manager_port": self.TRAFFIC_MANAGER_PORT,
+                "input_fresh": False,
+                "error": None,
+            })
+
+    def _service_vehicle_navigation(self, world, world_snapshot=None):
+        transition = getattr(self, "world_transition_event", None)
+        if transition is not None and transition.is_set():
+            return
+        runtime_store = getattr(self, "vehicle_navigation_runtime", None)
+        if not runtime_store:
+            return
+        world_id = self._world_id(world)
+        frame = getattr(world_snapshot, "frame", None)
+        now = time.monotonic()
+
+        for actor_id, runtime in list(runtime_store.items()):
+            if runtime.get("world_id") != world_id:
+                runtime_store.pop(actor_id, None)
+                continue
+            if frame is not None and runtime.get("last_frame") == frame:
+                continue
+            runtime["last_frame"] = frame
+            if now < runtime.get("next_check", 0.0):
+                continue
+            runtime["next_check"] = now + self.VEHICLE_NAVIGATION_CHECK_INTERVAL_SECONDS
+            actor = None
+            try:
+                actor = self._get_managed_vehicle(actor_id)
+                with self.database.lock:
+                    state = self.database.vehicle_control_states.get(actor_id)
+                    mode = None if state is None else state.get("mode")
+                if mode != AUTOPILOT_DESTINATION:
+                    runtime_store.pop(actor_id, None)
+                    continue
+
+                location = actor.get_location()
+                destination = runtime["destination"]
+                distance = self._vehicle_xy_distance(location, destination)
+                speed = self._vehicle_speed(actor)
+                moved = self._vehicle_xy_distance(location, runtime["last_location"])
+                if moved >= self.VEHICLE_DESTINATION_PROGRESS_DISTANCE:
+                    runtime["last_location"] = location
+                    runtime["last_progress_time"] = now
+
+                if (
+                    not runtime["arrival_braking"]
+                    and distance <= self.VEHICLE_DESTINATION_ARRIVAL_DISTANCE
+                ):
+                    actor.set_autopilot(False, self.TRAFFIC_MANAGER_PORT)
+                    actor.apply_control(carla.VehicleControl(
+                        throttle=0.0,
+                        steer=0.0,
+                        brake=0.6,
+                        hand_brake=False,
+                        manual_gear_shift=False,
+                    ))
+                    runtime["arrival_braking"] = True
+
+                navigation_status = VEHICLE_STATUS_NAVIGATING
+                status = "Destination navigation is active."
+                if runtime["arrival_braking"]:
+                    status = "Destination reached; vehicle is braking."
+                    if (
+                        distance <= self.VEHICLE_DESTINATION_STOP_DISTANCE
+                        and speed <= self.VEHICLE_DESTINATION_STOP_SPEED
+                    ):
+                        actor.apply_control(carla.VehicleControl(
+                            throttle=0.0,
+                            steer=0.0,
+                            brake=1.0,
+                            hand_brake=True,
+                            manual_gear_shift=False,
+                        ))
+                        navigation_status = VEHICLE_STATUS_ARRIVED
+                        status = "Destination reached; vehicle stopped."
+                        runtime_store.pop(actor_id, None)
+                    elif speed <= self.VEHICLE_DESTINATION_STOP_SPEED:
+                        actor.apply_control(carla.VehicleControl(
+                            throttle=0.0,
+                            steer=0.0,
+                            brake=1.0,
+                            hand_brake=True,
+                            manual_gear_shift=False,
+                        ))
+                        navigation_status = VEHICLE_STATUS_FAILED
+                        status = (
+                            "Vehicle stopped beyond the Destination tolerance."
+                        )
+                        runtime_store.pop(actor_id, None)
+                elif (
+                    speed <= self.VEHICLE_DESTINATION_STUCK_SPEED
+                    and now - runtime["last_progress_time"]
+                    >= self.VEHICLE_DESTINATION_STUCK_SECONDS
+                ):
+                    actor.set_autopilot(False, self.TRAFFIC_MANAGER_PORT)
+                    self._safe_stop_vehicle(actor)
+                    navigation_status = VEHICLE_STATUS_STUCK
+                    status = "Destination navigation stopped: vehicle is stuck."
+                    runtime_store.pop(actor_id, None)
+
+                with self.database.lock:
+                    state = self.database.vehicle_control_states.get(actor_id)
+                    if state is not None:
+                        state.update({
+                            "navigation_status": navigation_status,
+                            "status": status,
+                            "distance_to_destination": distance,
+                            "current_speed": speed,
+                            "autopilot_enabled": (
+                                navigation_status == VEHICLE_STATUS_NAVIGATING
+                                and not runtime["arrival_braking"]
+                            ),
+                            "error": (
+                                status
+                                if navigation_status == VEHICLE_STATUS_FAILED
+                                else None
+                            ),
+                        })
+                self._publish_vehicle_control_state(actor_id)
+            except Exception as error:
+                self.dashboard_monitor.record_error(error)
+                runtime_store.pop(actor_id, None)
+                if actor is not None and getattr(actor, "is_alive", False):
+                    try:
+                        actor.set_autopilot(False, self.TRAFFIC_MANAGER_PORT)
+                        self._clear_vehicle_navigation_path(actor)
+                        self._safe_stop_vehicle(actor)
+                    except Exception as cleanup_error:
+                        self.dashboard_monitor.record_error(cleanup_error)
+                with self.database.lock:
+                    state = self.database.vehicle_control_states.get(actor_id)
+                    if state is not None:
+                        state.update({
+                            "navigation_status": VEHICLE_STATUS_FAILED,
+                            "status": f"Destination navigation failed: {error}",
+                            "autopilot_enabled": False,
+                            "error": str(error),
+                        })
+                self._publish_vehicle_control_state(actor_id, error=error)
+
     def _set_vehicle_control_mode(self, world, data):
         session_id = data["session_id"]
         actor_id = int(data["actor_id"])
-        requested_mode = data["mode"]
+        requested_mode = normalize_vehicle_control_mode(data["mode"])
+        actor = None
+        destination_activation_started = False
         try:
             if requested_mode not in VEHICLE_CONTROL_MODES:
                 raise ValueError(f"Unknown vehicle control mode: {requested_mode}")
@@ -1967,7 +2884,26 @@ class CarlaController:
             actor = self._get_managed_vehicle(actor_id)
             with self.database.lock:
                 previous = self.database.vehicle_control_states[actor_id].copy()
-            previous_mode = previous.get("mode", NO_CONTROL)
+            previous_mode = normalize_vehicle_control_mode(
+                previous.get("mode", NO_CONTROL)
+            )
+
+            prepared_destination = None
+            if requested_mode == AUTOPILOT_DESTINATION:
+                destination_location, destination = (
+                    self._vehicle_destination_for_world(actor_id, world)
+                )
+                route, route_target = self._plan_vehicle_route(
+                    world,
+                    actor,
+                    destination_location,
+                )
+                prepared_destination = (
+                    destination_location,
+                    destination,
+                    route,
+                    route_target,
+                )
 
             if previous_mode == MANUAL_CONTROL and requested_mode != MANUAL_CONTROL:
                 self._safe_stop_vehicle(actor, previous.get("reverse", False))
@@ -1978,8 +2914,13 @@ class CarlaController:
                         "status": "Manual Control ended; vehicle stopped safely.",
                         "input_fresh": False,
                     })
-            if previous_mode == AUTOPILOT and requested_mode != AUTOPILOT:
+            if (
+                previous_mode in (AUTOPILOT_FREE_ROAM, AUTOPILOT_DESTINATION)
+                and requested_mode != previous_mode
+            ):
                 actor.set_autopilot(False, self.TRAFFIC_MANAGER_PORT)
+                if previous_mode == AUTOPILOT_DESTINATION:
+                    self._cancel_vehicle_navigation(actor_id, actor=actor)
                 with self.database.lock:
                     state = self.database.vehicle_control_states[actor_id]
                     state.update({
@@ -1989,13 +2930,29 @@ class CarlaController:
                         "traffic_manager_port": None,
                     })
 
-            if requested_mode == AUTOPILOT:
+            if requested_mode == AUTOPILOT_FREE_ROAM:
                 self._ensure_traffic_manager(world)
+                self._clear_vehicle_navigation_path(actor)
                 actor.set_autopilot(True, self.TRAFFIC_MANAGER_PORT)
                 status = (
-                    f"Autopilot active (Traffic Manager port "
+                    f"Autopilot Free Roam active (Traffic Manager port "
                     f"{self.TRAFFIC_MANAGER_PORT})."
                 )
+                navigation_status = (
+                    VEHICLE_STATUS_CANCELLED
+                    if previous_mode == AUTOPILOT_DESTINATION
+                    else VEHICLE_STATUS_IDLE
+                )
+            elif requested_mode == AUTOPILOT_DESTINATION:
+                destination_activation_started = True
+                self._activate_vehicle_destination(
+                    world,
+                    actor,
+                    actor_id,
+                    *prepared_destination,
+                )
+                self._publish_vehicle_control_state(actor_id, session_id=session_id)
+                return
             elif requested_mode == MANUAL_CONTROL:
                 self._safe_stop_vehicle(actor, previous.get("reverse", False))
                 self.manual_control_command = None
@@ -2003,19 +2960,34 @@ class CarlaController:
                 self.manual_control_next_apply = 0.0
                 self.manual_control_input_fresh = False
                 status = "Manual Control active; waiting for focused Pygame input."
+                navigation_status = (
+                    VEHICLE_STATUS_CANCELLED
+                    if previous_mode == AUTOPILOT_DESTINATION
+                    else VEHICLE_STATUS_IDLE
+                )
             else:
+                if previous_mode == AUTOPILOT_DESTINATION:
+                    self._safe_stop_vehicle(actor)
                 status = "No controller is active."
+                navigation_status = (
+                    VEHICLE_STATUS_CANCELLED
+                    if previous_mode == AUTOPILOT_DESTINATION
+                    else VEHICLE_STATUS_IDLE
+                )
 
             with self.database.lock:
                 state = self.database.vehicle_control_states[actor_id]
                 state.update({
                     "mode": requested_mode,
+                    "control_mode": requested_mode,
                     "status": status,
-                    "autopilot_enabled": requested_mode == AUTOPILOT,
+                    "navigation_status": navigation_status,
+                    "route": None,
+                    "autopilot_enabled": requested_mode == AUTOPILOT_FREE_ROAM,
                     "autopilot_state_source": "local",
                     "traffic_manager_port": (
                         self.TRAFFIC_MANAGER_PORT
-                        if requested_mode == AUTOPILOT else None
+                        if requested_mode == AUTOPILOT_FREE_ROAM else None
                     ),
                     "input_fresh": False,
                     "error": None,
@@ -2023,11 +2995,26 @@ class CarlaController:
             self._publish_vehicle_control_state(actor_id, session_id=session_id)
         except Exception as error:
             self.dashboard_monitor.record_error(error)
+            if (
+                requested_mode == AUTOPILOT_DESTINATION
+                and destination_activation_started
+                and actor is not None
+                and getattr(actor, "is_alive", False)
+            ):
+                try:
+                    actor.set_autopilot(False, self.TRAFFIC_MANAGER_PORT)
+                    self._clear_vehicle_navigation_path(actor)
+                    self._safe_stop_vehicle(actor)
+                except Exception as cleanup_error:
+                    self.dashboard_monitor.record_error(cleanup_error)
+                self.vehicle_navigation_runtime.pop(actor_id, None)
             with self.database.lock:
                 state = self.database.vehicle_control_states.get(actor_id)
                 if state is not None:
                     state["status"] = f"Control mode change failed: {error}"
                     state["error"] = str(error)
+                    if requested_mode == AUTOPILOT_DESTINATION:
+                        state["navigation_status"] = VEHICLE_STATUS_FAILED
             self._publish_vehicle_control_state(
                 actor_id,
                 session_id=session_id,
@@ -2124,6 +3111,7 @@ class CarlaController:
             if state is not None:
                 state.update({
                     "mode": NO_CONTROL,
+                    "control_mode": NO_CONTROL,
                     "status": f"Manual Control stopped: {error}",
                     "input_fresh": False,
                     "error": str(error),
@@ -2147,6 +3135,7 @@ class CarlaController:
             if state is not None and state.get("mode") == MANUAL_CONTROL:
                 state.update({
                     "mode": NO_CONTROL,
+                    "control_mode": NO_CONTROL,
                     "status": "Manual Control ended; vehicle stopped safely.",
                     "input_fresh": False,
                     "error": None,
@@ -2162,7 +3151,10 @@ class CarlaController:
         if (
             disable_autopilot
             and state_copy is not None
-            and state_copy.get("mode") == AUTOPILOT
+            and normalize_vehicle_control_mode(state_copy.get("mode")) in (
+                AUTOPILOT_FREE_ROAM,
+                AUTOPILOT_DESTINATION,
+            )
             and actor is not None
             and getattr(actor, "is_alive", False)
         ):
@@ -2170,12 +3162,21 @@ class CarlaController:
                 actor.set_autopilot(False, self.TRAFFIC_MANAGER_PORT)
             except Exception as error:
                 self.dashboard_monitor.record_error(error)
+        self._cancel_vehicle_navigation(
+            actor_id,
+            actor=actor,
+            status=VEHICLE_STATUS_CANCELLED,
+            stop_vehicle=False,
+        )
         with self.database.lock:
             state = self.database.vehicle_control_states.get(actor_id)
             if state is not None:
                 state.update({
                     "mode": NO_CONTROL,
+                    "control_mode": NO_CONTROL,
                     "status": "Vehicle control released.",
+                    "navigation_status": VEHICLE_STATUS_CANCELLED,
+                    "route": None,
                     "autopilot_enabled": False,
                     "traffic_manager_port": None,
                     "input_fresh": False,
@@ -2208,6 +3209,7 @@ class CarlaController:
         self.database.movement_event_queue.put((status, {
             "session_id": session_id,
             "actor_id": walker_id,
+            "world_id": self._movement_world_id(),
             "walker_ai_state": state,
             "message": str(error) if error else None,
         }))
@@ -2234,6 +3236,13 @@ class CarlaController:
             (float(first.x) - float(second.x)) ** 2
             + (float(first.y) - float(second.y)) ** 2
             + (float(first.z) - float(second.z)) ** 2
+        ) ** 0.5
+
+    @staticmethod
+    def _walker_xy_distance(first, second):
+        return (
+            (float(first.x) - float(second.x)) ** 2
+            + (float(first.y) - float(second.y)) ** 2
         ) ** 0.5
 
     @staticmethod
@@ -2377,7 +3386,9 @@ class CarlaController:
 
         runtime["fallback_direction"] = direction
         with self.database.lock:
-            speed = self.database.walker_ai_states[walker_id]["speed"]
+            saved_speed = self.database.walker_ai_states[walker_id]["speed"]
+        speed = runtime.get("speed", saved_speed)
+        runtime["speed"] = speed
         self._apply_walker_fallback_control(walker, direction, speed)
         return status_changed
 
@@ -2401,6 +3412,9 @@ class CarlaController:
         )
         runtime = self.walker_ai_runtime.setdefault(walker.id, {})
         runtime.update({
+            "world_id": self._world_id(world),
+            "navigation_mode": WALKER_CONTROL_RANDOM,
+            "speed": speed,
             "target": target,
             "next_check": now + self.WALKER_AI_CHECK_INTERVAL_SECONDS,
             "last_distance": None,
@@ -2431,10 +3445,95 @@ class CarlaController:
                     "available, using the actor heading."
                 ),
                 "error": None,
+                "control_mode": WALKER_CONTROL_RANDOM,
+                "movement_status": WALKER_STATUS_MOVING,
             })
         self._apply_walker_fallback_control(walker, direction, speed)
 
-    def _set_walker_ai_enabled(self, world, data):
+    def _start_walker_destination_control(self, world, walker, speed):
+        with self.database.lock:
+            state = self.database.walker_ai_states[walker.id]
+            destination = state.get("destination")
+        if (
+            not isinstance(destination, dict)
+            or not destination.get("confirmed")
+            or not isinstance(destination.get("selected"), dict)
+        ):
+            raise ValueError(
+                "Confirm a pedestrian destination before starting this mode."
+            )
+        if destination.get("world_id") != int(world.id):
+            raise ValueError(
+                "The selected destination belongs to another world episode."
+            )
+        selected = destination["selected"]
+        target = carla.Location(
+            x=float(selected["x"]),
+            y=float(selected["y"]),
+            z=float(selected["z"]),
+        )
+        location = walker.get_location()
+        distance = self._walker_xy_distance(location, target)
+        if distance <= self.WALKER_DESTINATION_ARRIVAL_DISTANCE:
+            self._apply_walker_fallback_control(
+                walker,
+                carla.Vector3D(x=0.0, y=0.0, z=0.0),
+                0.0,
+            )
+            with self.database.lock:
+                state = self.database.walker_ai_states[walker.id]
+                state.update({
+                    "mode": WALKER_AI_STOPPED,
+                    "active": False,
+                    "control_mode": WALKER_CONTROL_DESTINATION,
+                    "movement_status": WALKER_STATUS_ARRIVED,
+                    "target": self._serialize_location(target),
+                    "random_navigation": False,
+                    "status": "Arrived at the selected destination.",
+                    "error": None,
+                })
+            return
+
+        now = time.monotonic()
+        direction = self._walker_fallback_direction(location, target)
+        runtime = self.walker_ai_runtime.setdefault(walker.id, {})
+        runtime.update({
+            "world_id": self._world_id(world),
+            "navigation_mode": WALKER_CONTROL_DESTINATION,
+            "speed": speed,
+            "target": target,
+            "next_check": now + self.WALKER_AI_CHECK_INTERVAL_SECONDS,
+            "last_distance": distance,
+            "last_progress_at": now,
+            "last_progress_sim_time": None,
+            "last_frame": None,
+            "fallback_active": True,
+            "fallback_direction": direction,
+            "fallback_origin": location,
+            "fallback_last_location": location,
+            "fallback_last_progress_at": now,
+            "fallback_last_progress_sim_time": None,
+        })
+        with self.database.lock:
+            state = self.database.walker_ai_states[walker.id]
+            state.update({
+                "mode": WALKER_AI_RUNNING,
+                "active": True,
+                "speed": speed,
+                "controller_id": None,
+                "target": self._serialize_location(target),
+                "random_navigation": False,
+                "control_mode": WALKER_CONTROL_DESTINATION,
+                "movement_status": WALKER_STATUS_MOVING,
+                "state_source": "gui",
+                "status": (
+                    f"Moving to destination ({distance:.2f} m remaining)."
+                ),
+                "error": None,
+            })
+        self._apply_walker_fallback_control(walker, direction, speed)
+
+    def _set_walker_control_mode(self, world, data):
         session_id = data["session_id"]
         walker_id = int(data["actor_id"])
         try:
@@ -2442,40 +3541,41 @@ class CarlaController:
                 session_id != self.movement_preview_session_id
                 or walker_id != self.movement_preview_actor_id
             ):
-                raise RuntimeError("The Movement Control session is no longer active.")
+                raise RuntimeError(
+                    "The Movement Control session is no longer active."
+                )
+            requested_mode = str(data["mode"])
+            if requested_mode not in WALKER_CONTROL_MODES:
+                raise ValueError(
+                    f"Unknown pedestrian control mode: {requested_mode}"
+                )
             walker = self._get_managed_walker(walker_id)
+            with self.database.lock:
+                previous = self.database.walker_ai_states[walker_id].copy()
+                saved_speed = previous["speed"]
+            try:
+                speed = self._validate_walker_speed(data.get("speed"))
+            except (TypeError, ValueError):
+                if requested_mode != WALKER_CONTROL_MANUAL:
+                    raise
+                speed = saved_speed
 
-            if data["enabled"]:
-                speed = self._validate_walker_speed(data["speed"])
+            if requested_mode == WALKER_CONTROL_RANDOM:
                 self._start_walker_direct_control(world, walker, speed)
+            elif requested_mode == WALKER_CONTROL_DESTINATION:
+                self._start_walker_destination_control(world, walker, speed)
             else:
-                with self.database.lock:
-                    saved_speed = self.database.walker_ai_states[walker_id][
-                        "speed"
-                    ]
-                try:
-                    speed = self._validate_walker_speed(data["speed"])
-                except (TypeError, ValueError):
-                    speed = saved_speed
-                controller = self.walker_ai_controllers.get(walker_id)
-                if controller is not None and getattr(
-                    controller,
-                    "is_alive",
-                    False,
-                ):
-                    controller.stop()
+                was_destination = (
+                    previous.get("control_mode")
+                    == WALKER_CONTROL_DESTINATION
+                    and previous.get("active")
+                )
                 runtime = self.walker_ai_runtime.setdefault(walker_id, {})
                 runtime.update({
+                    "navigation_mode": WALKER_CONTROL_MANUAL,
                     "target": None,
-                    "next_check": 0.0,
-                    "last_distance": None,
-                    "last_progress_at": time.monotonic(),
-                    "last_progress_sim_time": None,
-                    "last_frame": None,
                     "fallback_active": False,
                     "fallback_direction": None,
-                    "fallback_origin": None,
-                    "fallback_last_location": None,
                 })
                 self._apply_walker_fallback_control(
                     walker,
@@ -2487,9 +3587,19 @@ class CarlaController:
                     state.update({
                         "mode": WALKER_AI_STOPPED,
                         "active": False,
-                        "status": "Walker AI is stopped and can be resumed.",
+                        "control_mode": WALKER_CONTROL_MANUAL,
+                        "movement_status": (
+                            WALKER_STATUS_CANCELLED
+                            if was_destination else WALKER_STATUS_IDLE
+                        ),
+                        "status": (
+                            "Destination movement cancelled."
+                            if was_destination else
+                            "Manual control selected; pedestrian stopped."
+                        ),
                         "speed": speed,
                         "target": None,
+                        "random_navigation": False,
                         "state_source": "gui",
                         "error": None,
                     })
@@ -2499,6 +3609,345 @@ class CarlaController:
                 walker_id,
                 error,
                 session_id=session_id,
+            )
+
+    def _set_walker_manual_control(self, data):
+        session_id = data["session_id"]
+        walker_id = int(data["actor_id"])
+        try:
+            if (
+                session_id != self.movement_preview_session_id
+                or walker_id != self.movement_preview_actor_id
+            ):
+                raise RuntimeError(
+                    "The Movement Control session is no longer active."
+                )
+            walker = self._get_managed_walker(walker_id)
+            speed = self._validate_walker_speed(data["speed"])
+            direction_x = float(data["direction_x"])
+            direction_y = float(data["direction_y"])
+            length = (direction_x ** 2 + direction_y ** 2) ** 0.5
+            if not math.isfinite(length) or length <= 1e-6:
+                raise ValueError("Manual direction X/Y must be non-zero.")
+            direction_x /= length
+            direction_y /= length
+            self.walker_ai_runtime.pop(walker_id, None)
+            direction = carla.Vector3D(
+                x=direction_x,
+                y=direction_y,
+                z=0.0,
+            )
+            self._apply_walker_fallback_control(walker, direction, speed)
+            with self.database.lock:
+                state = self.database.walker_ai_states[walker_id]
+                state.update({
+                    "mode": WALKER_AI_STOPPED,
+                    "active": False,
+                    "control_mode": WALKER_CONTROL_MANUAL,
+                    "movement_status": WALKER_STATUS_MOVING,
+                    "manual_direction": {
+                        "x": direction_x,
+                        "y": direction_y,
+                    },
+                    "speed": speed,
+                    "target": None,
+                    "random_navigation": False,
+                    "status": "Manual WalkerControl command is active.",
+                    "state_source": "gui",
+                    "error": None,
+                })
+            self._publish_walker_ai_state(walker_id, session_id=session_id)
+        except Exception as error:
+            self._walker_ai_failure(
+                walker_id,
+                error,
+                session_id=session_id,
+                stop_ai=False,
+            )
+
+    def _set_walker_ai_enabled(self, world, data):
+        compatibility_data = dict(data)
+        compatibility_data["mode"] = (
+            WALKER_CONTROL_RANDOM
+            if data.get("enabled") else WALKER_CONTROL_MANUAL
+        )
+        self._set_walker_control_mode(world, compatibility_data)
+
+    def _movement_destination_actor(self, data):
+        session_id = data["session_id"]
+        actor_id = int(data["actor_id"])
+        if (
+            session_id != self.movement_preview_session_id
+            or actor_id != self.movement_preview_actor_id
+        ):
+            raise RuntimeError(
+                "The Movement Control session is no longer active."
+            )
+        with self.database.lock:
+            actor = self.database.actors_db.actors.get(actor_id)
+            actor_info = self.database.actors_db.actors_db.get(actor_id)
+        if actor is None or actor_info is None or not actor.is_alive:
+            raise RuntimeError("The selected actor is no longer available.")
+        if not self.database.is_actor_managed(actor_id):
+            raise RuntimeError("Destination requires a GUI-managed actor.")
+        if actor.type_id.startswith("vehicle."):
+            category = "vehicle"
+        elif actor.type_id.startswith("walker."):
+            category = "pedestrian"
+        else:
+            raise RuntimeError(
+                "Destination supports vehicles and pedestrians only."
+            )
+        return session_id, actor_id, actor, category
+
+    def _publish_movement_destination(self, status, session_id, actor_id,
+                                      **values):
+        self.database.movement_event_queue.put((status, {
+            "session_id": session_id,
+            "actor_id": actor_id,
+            "world_id": self._movement_world_id(),
+            **values,
+        }))
+
+    def _validate_movement_destination(self, world, data):
+        session_id = data.get("session_id")
+        actor_id = int(data.get("actor_id"))
+        try:
+            session_id, actor_id, _actor, category = (
+                self._movement_destination_actor(data)
+            )
+            requested = point_from_values(
+                data.get("x"),
+                data.get("y"),
+                data.get("z"),
+            )
+            if category == "vehicle":
+                validation = validate_vehicle_destination(
+                    world,
+                    requested,
+                    carla,
+                )
+            else:
+                validation = validate_pedestrian_destination(requested)
+            validation_status, requested, adjusted, message = validation
+            destination = destination_result(
+                actor_id,
+                category,
+                int(world.id),
+                requested,
+                validation_status,
+                message,
+                adjusted=adjusted,
+            )
+            destination = self.database.set_movement_destination(
+                actor_id,
+                destination,
+            )
+            self._publish_movement_destination(
+                "movement_destination_validation",
+                session_id,
+                actor_id,
+                destination=destination,
+            )
+        except Exception as error:
+            self.dashboard_monitor.record_error(error)
+            category = "unknown"
+            try:
+                with self.database.lock:
+                    actor = self.database.actors_db.actors.get(actor_id)
+                category = (
+                    "vehicle"
+                    if actor is not None
+                    and actor.type_id.startswith("vehicle.")
+                    else "pedestrian"
+                )
+                destination = empty_destination(
+                    actor_id,
+                    category,
+                    int(world.id),
+                )
+                destination.update({
+                    "validation_status": DESTINATION_ERROR,
+                    "message": f"Destination validation failed: {error}",
+                })
+                self.database.set_movement_destination(
+                    actor_id,
+                    destination,
+                )
+            except Exception:
+                destination = None
+            self._publish_movement_destination(
+                "movement_destination_error",
+                session_id,
+                actor_id,
+                destination=destination,
+                message=str(error),
+            )
+
+    def _confirm_movement_destination(self, world, data):
+        session_id = data.get("session_id")
+        actor_id = int(data.get("actor_id"))
+        try:
+            session_id, actor_id, _actor, _category = (
+                self._movement_destination_actor(data)
+            )
+            destination = self.database.get_movement_destination(actor_id)
+            if destination is None or destination.get("world_id") != int(world.id):
+                raise ValueError(
+                    "Validate a destination in the current world first."
+                )
+            destination = confirm_destination(destination)
+            destination = self.database.set_movement_destination(
+                actor_id,
+                destination,
+            )
+            self._publish_movement_destination(
+                "movement_destination_confirmed",
+                session_id,
+                actor_id,
+                destination=destination,
+            )
+        except Exception as error:
+            self.dashboard_monitor.record_error(error)
+            self._publish_movement_destination(
+                "movement_destination_error",
+                session_id,
+                actor_id,
+                destination=self.database.get_movement_destination(actor_id),
+                message=str(error),
+            )
+
+    def _clear_movement_destination(self, world, data):
+        session_id = data.get("session_id")
+        actor_id = int(data.get("actor_id"))
+        try:
+            session_id, actor_id, actor, category = (
+                self._movement_destination_actor(data)
+            )
+            if category == "vehicle":
+                with self.database.lock:
+                    state = self.database.vehicle_control_states.get(actor_id)
+                    active_destination = (
+                        state is not None
+                        and state.get("mode") == AUTOPILOT_DESTINATION
+                    )
+                if active_destination:
+                    self._cancel_vehicle_navigation(
+                        actor_id,
+                        actor=actor,
+                        status=VEHICLE_STATUS_CANCELLED,
+                        stop_vehicle=True,
+                    )
+                    with self.database.lock:
+                        state = self.database.vehicle_control_states.get(actor_id)
+                        if state is not None:
+                            state.update({
+                                "mode": NO_CONTROL,
+                                "control_mode": NO_CONTROL,
+                                "status": "Destination navigation cancelled.",
+                                "autopilot_enabled": False,
+                                "traffic_manager_port": None,
+                            })
+                    self._publish_vehicle_control_state(
+                        actor_id,
+                        session_id=session_id,
+                    )
+            destination = empty_destination(
+                actor_id,
+                category,
+                int(world.id),
+            )
+            destination = self.database.set_movement_destination(
+                actor_id,
+                destination,
+            )
+            self._publish_movement_destination(
+                "movement_destination_cleared",
+                session_id,
+                actor_id,
+                destination=destination,
+            )
+        except Exception as error:
+            self.dashboard_monitor.record_error(error)
+            self._publish_movement_destination(
+                "movement_destination_error",
+                session_id,
+                actor_id,
+                message=str(error),
+            )
+
+    def _get_movement_destination_map(self, world, data):
+        session_id = data.get("session_id")
+        actor_id = int(data.get("actor_id"))
+        try:
+            session_id, actor_id, actor, _category = (
+                self._movement_destination_actor(data)
+            )
+            waypoints = world.get_map().generate_waypoints(
+                MAP_WAYPOINT_DISTANCE_METERS
+            )
+            points = []
+            seen = set()
+            for waypoint in waypoints:
+                location = waypoint.transform.location
+                key = (
+                    round(float(location.x), 3),
+                    round(float(location.y), 3),
+                    int(getattr(waypoint, "road_id", 0)),
+                    int(getattr(waypoint, "lane_id", 0)),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                points.append({
+                    "x": float(location.x),
+                    "y": float(location.y),
+                    "z": float(location.z),
+                    "road_id": key[2],
+                    "lane_id": key[3],
+                    "s": float(getattr(waypoint, "s", 0.0)),
+                })
+            if not points:
+                raise RuntimeError(
+                    "The active CARLA map did not provide road waypoints."
+                )
+            self._publish_movement_destination(
+                "movement_destination_map",
+                session_id,
+                actor_id,
+                map_name=str(world.get_map().name),
+                actor_location=point_from_location(actor.get_location()),
+                points=points,
+            )
+        except Exception as error:
+            self.dashboard_monitor.record_error(error)
+            self._publish_movement_destination(
+                "movement_destination_map_error",
+                session_id,
+                actor_id,
+                message=str(error),
+            )
+
+    def _get_movement_actor_location(self, data):
+        session_id = data.get("session_id")
+        actor_id = int(data.get("actor_id"))
+        try:
+            session_id, actor_id, actor, _category = (
+                self._movement_destination_actor(data)
+            )
+            self._publish_movement_destination(
+                "movement_actor_location",
+                session_id,
+                actor_id,
+                actor_location=point_from_location(actor.get_location()),
+            )
+        except Exception as error:
+            self.dashboard_monitor.record_error(error)
+            self._publish_movement_destination(
+                "movement_destination_error",
+                session_id,
+                actor_id,
+                message=str(error),
             )
 
     def _set_walker_ai_speed(self, data):
@@ -2514,35 +3963,80 @@ class CarlaController:
             self._get_managed_walker(walker_id)
             with self.database.lock:
                 state = self.database.walker_ai_states[walker_id]
+                previous_speed = state["speed"]
                 active = state["active"]
+                control_mode = state.get(
+                    "control_mode",
+                    WALKER_CONTROL_MANUAL,
+                )
+                movement_status = state.get("movement_status")
+                manual_direction = dict(
+                    state.get("manual_direction") or {}
+                )
+                state["speed"] = speed
+            runtime = self.walker_ai_runtime.get(walker_id)
+            previous_runtime_speed = (
+                None if runtime is None else runtime.get("speed")
+            )
+            if runtime is not None:
+                runtime["speed"] = speed
             controller = self.walker_ai_controllers.get(walker_id)
-            if active:
-                runtime = self.walker_ai_runtime.get(walker_id, {})
-                if runtime.get("fallback_active"):
-                    direction = runtime.get("fallback_direction")
-                    if direction is not None:
-                        walker = self._get_managed_walker(walker_id)
-                        self._apply_walker_fallback_control(
-                            walker,
-                            direction,
-                            speed,
-                        )
-                elif controller is None or not getattr(
-                    controller,
-                    "is_alive",
-                    False,
+            try:
+                if active:
+                    active_runtime = runtime or {}
+                    if active_runtime.get("fallback_active"):
+                        direction = active_runtime.get("fallback_direction")
+                        if direction is not None:
+                            walker = self._get_managed_walker(walker_id)
+                            self._apply_walker_fallback_control(
+                                walker,
+                                direction,
+                                speed,
+                            )
+                    elif controller is None or not getattr(
+                        controller,
+                        "is_alive",
+                        False,
+                    ):
+                        raise RuntimeError("The Walker AI controller is unavailable.")
+                    else:
+                        controller.set_max_speed(speed)
+                elif (
+                    control_mode == WALKER_CONTROL_MANUAL
+                    and movement_status == WALKER_STATUS_MOVING
                 ):
-                    raise RuntimeError("The Walker AI controller is unavailable.")
-                else:
-                    controller.set_max_speed(speed)
+                    walker = self._get_managed_walker(walker_id)
+                    self._apply_walker_fallback_control(
+                        walker,
+                        carla.Vector3D(
+                            x=float(manual_direction.get("x", 1.0)),
+                            y=float(manual_direction.get("y", 0.0)),
+                            z=0.0,
+                        ),
+                        speed,
+                    )
+            except Exception:
+                with self.database.lock:
+                    state = self.database.walker_ai_states.get(walker_id)
+                    if state is not None:
+                        state["speed"] = previous_speed
+                if runtime is not None:
+                    if previous_runtime_speed is None:
+                        runtime.pop("speed", None)
+                    else:
+                        runtime["speed"] = previous_runtime_speed
+                raise
             with self.database.lock:
                 state = self.database.walker_ai_states[walker_id]
-                state["speed"] = speed
                 state["state_source"] = "gui"
                 state["status"] = (
                     f"Walker AI speed set to {speed:.1f} m/s."
                     if active else
-                    f"Walker AI stopped; speed {speed:.1f} m/s saved."
+                    (
+                        f"Manual WalkerControl speed set to {speed:.1f} m/s."
+                        if movement_status == WALKER_STATUS_MOVING else
+                        f"Pedestrian idle; speed {speed:.1f} m/s saved."
+                    )
                 )
                 state["error"] = None
             self._publish_walker_ai_state(walker_id, session_id=session_id)
@@ -2554,8 +4048,96 @@ class CarlaController:
                 stop_ai=False,
             )
 
-    def _service_walker_ai(self, world, world_snapshot=None):
+    def _service_walker_destination(self, walker_id, walker,
+                                    simulation_time):
+        runtime = self.walker_ai_runtime[walker_id]
+        target = runtime.get("target")
+        if target is None:
+            raise RuntimeError("Destination runtime target is unavailable.")
+        location = walker.get_location()
+        distance = self._walker_xy_distance(location, target)
         now = time.monotonic()
+        if distance <= self.WALKER_DESTINATION_ARRIVAL_DISTANCE:
+            self._apply_walker_fallback_control(
+                walker,
+                carla.Vector3D(x=0.0, y=0.0, z=0.0),
+                0.0,
+            )
+            runtime["fallback_active"] = False
+            with self.database.lock:
+                state = self.database.walker_ai_states[walker_id]
+                state.update({
+                    "mode": WALKER_AI_STOPPED,
+                    "active": False,
+                    "movement_status": WALKER_STATUS_ARRIVED,
+                    "status": "Arrived at the selected destination.",
+                    "error": None,
+                })
+            return True
+
+        last_distance = runtime.get("last_distance")
+        progressed = (
+            last_distance is None
+            or distance
+            <= last_distance - self.WALKER_DESTINATION_PROGRESS_DISTANCE
+        )
+        if progressed:
+            runtime["last_distance"] = distance
+            runtime["last_progress_at"] = now
+            if simulation_time is not None:
+                runtime["last_progress_sim_time"] = simulation_time
+
+        progress_sim_time = runtime.get("last_progress_sim_time")
+        if simulation_time is not None and progress_sim_time is not None:
+            stalled = (
+                simulation_time - progress_sim_time
+                >= self.WALKER_AI_FALLBACK_STALL_SECONDS
+            )
+        else:
+            stalled = (
+                now - runtime.get("last_progress_at", now)
+                >= self.WALKER_AI_FALLBACK_STALL_SECONDS
+            )
+        if stalled:
+            self._apply_walker_fallback_control(
+                walker,
+                carla.Vector3D(x=0.0, y=0.0, z=0.0),
+                0.0,
+            )
+            runtime["fallback_active"] = False
+            with self.database.lock:
+                state = self.database.walker_ai_states[walker_id]
+                state.update({
+                    "mode": WALKER_AI_STOPPED,
+                    "active": False,
+                    "movement_status": WALKER_STATUS_STUCK,
+                    "status": (
+                        "Pedestrian is Stuck; destination movement stopped."
+                    ),
+                    "error": None,
+                })
+            return True
+
+        direction = self._walker_fallback_direction(location, target)
+        runtime["fallback_direction"] = direction
+        with self.database.lock:
+            state = self.database.walker_ai_states[walker_id]
+            saved_speed = state["speed"]
+            state["movement_status"] = WALKER_STATUS_MOVING
+            state["status"] = (
+                f"Moving to destination ({distance:.2f} m remaining)."
+            )
+        speed = runtime.get("speed", saved_speed)
+        runtime["speed"] = speed
+        self._apply_walker_fallback_control(walker, direction, speed)
+        return True
+
+    def _service_walker_ai(self, world, world_snapshot=None):
+        transition = getattr(self, "world_transition_event", None)
+        if transition is not None and transition.is_set():
+            return
+        now = time.monotonic()
+        current_world_id = self._world_id(world)
         with self.database.lock:
             active_ids = [
                 walker_id
@@ -2574,8 +4156,14 @@ class CarlaController:
         simulation_time = getattr(timestamp, "elapsed_seconds", None)
 
         for walker_id in active_ids:
+            with self.database.lock:
+                current_speed = self.database.walker_ai_states[walker_id][
+                    "speed"
+                ]
             runtime = self.walker_ai_runtime.setdefault(walker_id, {
+                "world_id": current_world_id,
                 "target": None,
+                "speed": current_speed,
                 "next_check": 0.0,
                 "last_distance": None,
                 "last_progress_at": now,
@@ -2588,6 +4176,14 @@ class CarlaController:
                 "fallback_last_progress_at": None,
                 "fallback_last_progress_sim_time": None,
             })
+            runtime_world_id = runtime.get("world_id")
+            if (
+                runtime_world_id is not None
+                and current_world_id is not None
+                and int(runtime_world_id) != current_world_id
+            ):
+                self.walker_ai_runtime.pop(walker_id, None)
+                continue
             if now < runtime.get("next_check", 0.0):
                 continue
             runtime["next_check"] = now + self.WALKER_AI_CHECK_INTERVAL_SECONDS
@@ -2597,12 +4193,23 @@ class CarlaController:
                     continue
                 runtime["last_frame"] = frame
 
-                changed = self._service_walker_fallback(
-                    world,
-                    walker_id,
-                    walker,
-                    simulation_time,
-                )
+                with self.database.lock:
+                    control_mode = self.database.walker_ai_states[
+                        walker_id
+                    ].get("control_mode", WALKER_CONTROL_RANDOM)
+                if control_mode == WALKER_CONTROL_DESTINATION:
+                    changed = self._service_walker_destination(
+                        walker_id,
+                        walker,
+                        simulation_time,
+                    )
+                else:
+                    changed = self._service_walker_fallback(
+                        world,
+                        walker_id,
+                        walker,
+                        simulation_time,
+                    )
                 if changed:
                     self._publish_walker_ai_state(walker_id)
             except Exception as error:
@@ -2624,6 +4231,7 @@ class CarlaController:
                     "status": f"Walker AI error: {error}",
                     "target": None if stop_ai else state.get("target"),
                     "error": str(error),
+                    "movement_status": WALKER_STATUS_FAILED,
                 })
         self._publish_walker_ai_state(
             walker_id,
@@ -2662,12 +4270,18 @@ class CarlaController:
             else:
                 state = self.database.walker_ai_states.get(walker_id)
                 if state is not None:
+                    was_active = bool(state.get("active"))
                     state.update({
                         "mode": WALKER_AI_STOPPED,
                         "active": False,
                         "status": "Walker AI controller was released.",
                         "controller_id": None,
                         "target": None,
+                        "movement_status": (
+                            WALKER_STATUS_CANCELLED
+                            if was_active else
+                            state.get("movement_status", WALKER_STATUS_IDLE)
+                        ),
                     })
 
     def _shutdown_walker_ai(self):
@@ -2733,6 +4347,7 @@ class CarlaController:
             self.movement_preview_publisher = publisher
             self.movement_preview_session_id = session_id
             self.movement_preview_actor_id = parent_actor.id
+            self.movement_preview_world_id = self._world_id(world)
             self.movement_control_queue = data["control_queue"]
             self.manual_control_command = None
             self.manual_control_received_at = None
@@ -2741,6 +4356,7 @@ class CarlaController:
                 "movement_camera_started",
                 {
                     "session_id": session_id,
+                    "world_id": self._world_id(world),
                     "sensor_id": camera.id,
                     "actor_id": parent_actor.id,
                     "preset": data["preset"],
@@ -2777,6 +4393,7 @@ class CarlaController:
                 "movement_camera_error",
                 {
                     "session_id": session_id,
+                    "world_id": data.get("world_id"),
                     "message": f"Could not start Movement Preview camera: {error}",
                 },
             ))
@@ -2807,6 +4424,7 @@ class CarlaController:
                 "movement_camera_preset_changed",
                 {
                     "session_id": session_id,
+                    "world_id": self.movement_preview_world_id,
                     "sensor_id": self.movement_preview_camera.id,
                     "preset": data["preset"],
                 },
@@ -2817,6 +4435,7 @@ class CarlaController:
                 "movement_camera_error",
                 {
                     "session_id": session_id,
+                    "world_id": data.get("world_id"),
                     "message": f"Could not change camera preset: {error}",
                 },
             ))
@@ -2826,6 +4445,7 @@ class CarlaController:
         publisher = self.movement_preview_publisher
         session_id = self.movement_preview_session_id
         actor_id = self.movement_preview_actor_id
+        world_id = getattr(self, "movement_preview_world_id", None)
 
         if actor_id is not None:
             self._close_manual_session(actor_id)
@@ -2834,6 +4454,7 @@ class CarlaController:
         self.movement_preview_publisher = None
         self.movement_preview_session_id = None
         self.movement_preview_actor_id = None
+        self.movement_preview_world_id = None
         self.movement_control_queue = None
         self.manual_control_command = None
         self.manual_control_received_at = None
@@ -2861,6 +4482,7 @@ class CarlaController:
                 "movement_camera_stopped",
                 {
                     "session_id": session_id,
+                    "world_id": world_id,
                     "reason": reason,
                 },
             ))
@@ -2881,7 +4503,7 @@ class CarlaController:
             {
                 "message": (
                     f"The selected {actor_kind} is external and cannot be "
-                    "modified until ownership takeover is implemented."
+                    "modified until ownership is taken."
                 ),
                 "actor_id": actor_id,
             },
@@ -3010,6 +4632,7 @@ class CarlaController:
                 ))
                 return False
             self.active_load_plan = None
+        self.world_transition_event.set()
         self.world_changed_event.clear()
         self.database.world_changed = False
         self.database.world_change_error = None
@@ -3130,21 +4753,44 @@ class CarlaController:
     def stop_simulation_control(self):
         self.priority_command_queue.put(("stop_simulation_control", None))
 
-    def spawn_preview_actor(self, blueprint_id, transform, image_callback):
+    def spawn_preview_actor(self, blueprint_id, transform, image_callback,
+                            request_id=None):
         if self._scenario_mutation_blocked("spawn preview actor"):
             return False
+        transition = getattr(self, "world_transition_event", None)
+        if (
+            (transition is not None and transition.is_set())
+            or not getattr(self, "running", True)
+        ):
+            return False
+        request_id = str(request_id or "")
+        if not request_id:
+            return False
+        with self.database.lock:
+            self.database.ghost_preview_request_id = request_id
+            self.database.ghost_preview_requested_enabled = True
         self.command_queue.put(("spawn_preview_actor", {
             "blueprint_id": blueprint_id,
             "transform": transform,
             "image_callback": image_callback,
+            "request_id": request_id,
         }))
         return True
 
     def set_ghost_transform(self, transform):
         self.command_queue.put(("set_ghost_transform", transform))
 
-    def destroy_preview_actor(self):
-        self.command_queue.put(("destroy_preview_actor", None))
+    def destroy_preview_actor(self, request_id=None):
+        request_id = str(request_id or "")
+        if not request_id:
+            return False
+        with self.database.lock:
+            self.database.ghost_preview_request_id = request_id
+            self.database.ghost_preview_requested_enabled = False
+        self.command_queue.put(("destroy_preview_actor", {
+            "request_id": request_id,
+        }))
+        return True
 
     def update_preview_actor_model(self, blueprint_id):
         self.command_queue.put(
@@ -3162,12 +4808,40 @@ class CarlaController:
     def apply_new_physics_and_blueprint_to_ghost(self, physics_control):
         self.command_queue.put(("apply_new_physics_and_blueprint_to_ghost", physics_control))
 
-    def change_actor_model(self, blueprint_id, actor_id):
+    def get_vehicle_edit_data(self, actor_id, request_id=None):
+        if not self._managed_operation_allowed(actor_id):
+            return False
+        self.command_queue.put(("get_vehicle_edit_data", {
+            "actor_id": int(actor_id),
+            "request_id": request_id,
+        }))
+        return True
+
+    def apply_vehicle_physics(self, actor_id, physics, request_id=None):
+        if self._scenario_mutation_blocked("apply vehicle physics"):
+            return False
+        if not self._managed_operation_allowed(actor_id):
+            return False
+        self.command_queue.put(("apply_vehicle_physics", {
+            "actor_id": int(actor_id),
+            "physics": physics,
+            "request_id": request_id,
+        }))
+        return True
+
+    def change_actor_model(self, blueprint_id, actor_id, attributes=None,
+                           physics=None, request_id=None):
         if self._scenario_mutation_blocked("change actor model"):
             return False
         if not self._managed_operation_allowed(actor_id):
             return False
-        self.command_queue.put(("change_actor_model", [blueprint_id, actor_id]))
+        self.command_queue.put(("change_actor_model", {
+            "blueprint_id": blueprint_id,
+            "actor_id": int(actor_id),
+            "attributes": attributes,
+            "physics": physics,
+            "request_id": request_id,
+        }))
         return True
 
     def set_actor_transform(self, new_transform, actor_id):
@@ -3226,52 +4900,127 @@ class CarlaController:
             return False
         if not self._managed_operation_allowed(actor_id):
             return False
-        self.command_queue.put(("start_movement_preview", {
+        return self._queue_movement_command("start_movement_preview", {
             "session_id": session_id,
             "actor_id": actor_id,
             "actor_type": actor_type,
             "preset": preset,
             "publisher": publisher,
             "control_queue": control_queue,
-        }))
-        return True
+        })
 
     def set_vehicle_control_mode(self, session_id, actor_id, mode):
         if self._scenario_mutation_blocked("change vehicle control"):
             return False
         if not self._managed_operation_allowed(actor_id):
             return False
-        self.command_queue.put(("set_vehicle_control_mode", {
+        return self._queue_movement_command("set_vehicle_control_mode", {
             "session_id": session_id,
             "actor_id": actor_id,
             "mode": mode,
-        }))
-        return True
+        })
 
     def set_walker_ai_enabled(self, session_id, actor_id, enabled, speed):
         if self._scenario_mutation_blocked("change pedestrian control"):
             return False
         if not self._managed_operation_allowed(actor_id):
             return False
-        self.command_queue.put(("set_walker_ai_enabled", {
+        return self._queue_movement_command("set_walker_ai_enabled", {
             "session_id": session_id,
             "actor_id": actor_id,
             "enabled": bool(enabled),
             "speed": speed,
-        }))
-        return True
+        })
 
     def set_walker_ai_speed(self, session_id, actor_id, speed):
         if self._scenario_mutation_blocked("change pedestrian speed"):
             return False
         if not self._managed_operation_allowed(actor_id):
             return False
-        self.command_queue.put(("set_walker_ai_speed", {
+        return self._queue_movement_command("set_walker_ai_speed", {
             "session_id": session_id,
             "actor_id": actor_id,
             "speed": speed,
-        }))
-        return True
+        })
+
+    def set_walker_control_mode(self, session_id, actor_id, mode, speed):
+        if self._scenario_mutation_blocked("change pedestrian control mode"):
+            return False
+        if not self._managed_operation_allowed(actor_id):
+            return False
+        return self._queue_movement_command("set_walker_control_mode", {
+            "session_id": session_id,
+            "actor_id": int(actor_id),
+            "mode": str(mode),
+            "speed": speed,
+        })
+
+    def set_walker_manual_control(self, session_id, actor_id, direction_x,
+                                  direction_y, speed):
+        if self._scenario_mutation_blocked("apply pedestrian manual control"):
+            return False
+        if not self._managed_operation_allowed(actor_id):
+            return False
+        return self._queue_movement_command("set_walker_manual_control", {
+            "session_id": session_id,
+            "actor_id": int(actor_id),
+            "direction_x": direction_x,
+            "direction_y": direction_y,
+            "speed": speed,
+        })
+
+    def validate_movement_destination(self, session_id, actor_id, x, y, z):
+        if self._scenario_mutation_blocked("validate movement destination"):
+            return False
+        if not self._managed_operation_allowed(actor_id):
+            return False
+        return self._queue_movement_command("validate_movement_destination", {
+            "session_id": session_id,
+            "actor_id": int(actor_id),
+            "x": x,
+            "y": y,
+            "z": z,
+        })
+
+    def confirm_movement_destination(self, session_id, actor_id):
+        if self._scenario_mutation_blocked("confirm movement destination"):
+            return False
+        if not self._managed_operation_allowed(actor_id):
+            return False
+        return self._queue_movement_command("confirm_movement_destination", {
+            "session_id": session_id,
+            "actor_id": int(actor_id),
+        })
+
+    def clear_movement_destination(self, session_id, actor_id):
+        if self._scenario_mutation_blocked("clear movement destination"):
+            return False
+        if not self._managed_operation_allowed(actor_id):
+            return False
+        return self._queue_movement_command("clear_movement_destination", {
+            "session_id": session_id,
+            "actor_id": int(actor_id),
+        })
+
+    def get_movement_destination_map(self, session_id, actor_id):
+        if self._scenario_mutation_blocked("prepare destination map"):
+            return False
+        if not self._managed_operation_allowed(actor_id):
+            return False
+        return self._queue_movement_command("get_movement_destination_map", {
+            "session_id": session_id,
+            "actor_id": int(actor_id),
+        })
+
+    def get_movement_actor_location(self, session_id, actor_id):
+        if self._scenario_mutation_blocked("read actor destination position"):
+            return False
+        if not self._managed_operation_allowed(actor_id):
+            return False
+        return self._queue_movement_command("get_movement_actor_location", {
+            "session_id": session_id,
+            "actor_id": int(actor_id),
+        })
 
     def take_actor_ownership(self, runtime_id):
         try:
@@ -3335,13 +5084,15 @@ class CarlaController:
         return blocked
 
     def set_movement_preview_transform(self, session_id, preset):
-        self.command_queue.put(("set_movement_preview_transform", {
+        return self._queue_movement_command("set_movement_preview_transform", {
             "session_id": session_id,
             "preset": preset,
-        }))
+        })
 
     def stop_movement_preview(self, session_id, reason="preview_stopped"):
         self.command_queue.put(("stop_movement_preview", {
             "session_id": session_id,
+            "world_id": self._movement_world_id(),
             "reason": reason,
         }))
+        return True

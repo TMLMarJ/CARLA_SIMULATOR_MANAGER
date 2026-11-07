@@ -2,6 +2,9 @@ from dataclasses import asdict, dataclass, field
 
 from scenario_management.converters import (
     apply_vehicle_physics_from_dict,
+    blueprint_attribute_current_value,
+    blueprint_attribute_kind,
+    blueprint_value_to_string,
     transform_from_dict,
 )
 from scenario_management.models import (
@@ -10,7 +13,6 @@ from scenario_management.models import (
     ActorOwnership,
     DataSource,
 )
-from scenario_management.scenario_loader import LoadReadiness
 from scenario_management.world_cleaner import ClearMode
 
 
@@ -37,9 +39,12 @@ class ScenarioLoadReport:
     sync_report: dict = field(default_factory=dict)
     status: str = "failed"
 
-    def add_error(self, stage, message, scenario_id=None):
+    def add_error(self, stage, message, scenario_id=None, user_name=None,
+                  blueprint_id=None):
         self.errors.append({
             "scenario_id": scenario_id,
+            "user_name": user_name,
+            "blueprint_id": blueprint_id,
             "stage": str(stage),
             "message": str(message),
         })
@@ -72,6 +77,8 @@ class ScenarioLoadExecutionResult:
 
 class ScenarioRestorer:
     """Executes one validated replacement of the current CARLA world."""
+
+    VEHICLE_SPAWN_Z_OFFSET = 0.2
 
     def __init__(self, loader, serializer, validator, world_cleaner,
                  carla_module):
@@ -108,6 +115,7 @@ class ScenarioRestorer:
                 "by the managed Scenario Load scope."
             )
         destructive_started = False
+        operation_stage = "preflight"
         try:
             if self._world_id(world) != plan.world_id:
                 raise StaleLoadPlanError(
@@ -134,6 +142,7 @@ class ScenarioRestorer:
 
             if fresh_plan.map_change_required:
                 destructive_started = True
+                operation_stage = "map_change"
                 world, blueprint_library, available_maps, server_version = (
                     change_world(fresh_plan.target_map)
                 )
@@ -169,6 +178,7 @@ class ScenarioRestorer:
                                         synchronize)
                 execution_plan = post_plan
             else:
+                operation_stage = "clear"
                 clear_plan = self.world_cleaner.prepare_plan(
                     world,
                     database,
@@ -234,6 +244,7 @@ class ScenarioRestorer:
                                         synchronize)
                 execution_plan = fresh_plan
 
+            operation_stage = "world_settings"
             try:
                 apply_world_settings(world, document["world"])
             except Exception as error:
@@ -264,8 +275,7 @@ class ScenarioRestorer:
                 )
                 report.map_changed = True
             report.add_error(
-                "map_change" if destructive_started and plan.map_change_required
-                else "preflight",
+                operation_stage,
                 error,
             )
         return self._finish(
@@ -300,6 +310,8 @@ class ScenarioRestorer:
                     ),
                     "Parent actor was not restored.",
                     scenario_id,
+                    data.get("user_name"),
+                    data.get("blueprint_id"),
                 )
                 continue
             if (
@@ -326,7 +338,6 @@ class ScenarioRestorer:
                 report.warnings.extend(
                     f"{scenario_id}: {warning}" for warning in spawn_warnings
                 )
-                runtime_by_scenario[scenario_id] = actor
                 self._register_actor(
                     database,
                     actor,
@@ -334,8 +345,12 @@ class ScenarioRestorer:
                     runtime_by_scenario.get(parent_id),
                     spawn_warnings,
                 )
+                runtime_by_scenario[scenario_id] = actor
                 report.restored += 1
             except Exception as error:
+                if actor is not None:
+                    self._discard_actor(database, actor)
+                runtime_by_scenario.pop(scenario_id, None)
                 report.failed += 1
                 failed_scenarios.add(scenario_id)
                 report.add_error(
@@ -347,6 +362,8 @@ class ScenarioRestorer:
                     ),
                     error,
                     scenario_id,
+                    data.get("user_name"),
+                    data.get("blueprint_id"),
                 )
                 continue
 
@@ -361,7 +378,13 @@ class ScenarioRestorer:
                         f"{scenario_id}: {warning}" for warning in warnings
                     )
                 except Exception as error:
-                    report.add_error("physics", error, scenario_id)
+                    report.add_error(
+                        "physics",
+                        error,
+                        scenario_id,
+                        data.get("user_name"),
+                        data.get("blueprint_id"),
+                    )
 
             try:
                 warnings = restore_control(
@@ -374,7 +397,13 @@ class ScenarioRestorer:
                     f"{scenario_id}: {warning}" for warning in warnings
                 )
             except Exception as error:
-                report.add_error("control", error, scenario_id)
+                report.add_error(
+                    "control",
+                    error,
+                    scenario_id,
+                    data.get("user_name"),
+                    data.get("blueprint_id"),
+                )
                 if data["category"] == ActorCategory.WALKER_AI_CONTROLLER:
                     self._discard_actor(database, actor)
                     runtime_by_scenario.pop(scenario_id, None)
@@ -383,10 +412,12 @@ class ScenarioRestorer:
                     failed_scenarios.add(scenario_id)
 
     def _spawn_one(self, world, library, data, parent, actor_plan):
-        blueprint = library.find(str(data["blueprint_id"]))
-        if str(getattr(blueprint, "id", "")) != str(data["blueprint_id"]):
+        blueprint_id = str(data["blueprint_id"])
+        blueprint = library.find(blueprint_id)
+        if str(getattr(blueprint, "id", "")) != blueprint_id:
             raise RuntimeError("Blueprint lookup returned a different ID.")
         originals = {}
+        applied = {}
         warnings = []
         try:
             for name, value in data.get("blueprint_attributes", {}).items():
@@ -395,19 +426,26 @@ class ScenarioRestorer:
                         f"Blueprint attribute '{name}' was omitted."
                     )
                     continue
+                attribute = None
                 try:
                     attribute = blueprint.get_attribute(name)
-                    as_string = getattr(attribute, "as_str", None)
-                    originals[name] = (
-                        str(as_string()) if callable(as_string)
-                        else str(attribute)
+                    originals[name] = blueprint_attribute_current_value(
+                        attribute
                     )
-                    blueprint.set_attribute(name, str(value))
+                    converted = blueprint_value_to_string(attribute, value)
+                    blueprint.set_attribute(name, converted)
+                    applied[name] = (attribute, converted, value)
                 except Exception as error:
-                    warnings.append(
-                        f"Blueprint attribute '{name}' was not applied: {error}"
+                    attribute_kind = (
+                        blueprint_attribute_kind(attribute)
+                        if attribute is not None else "unknown"
                     )
-            transform = transform_from_dict(data["transform"], self.carla)
+                    warnings.append(
+                        f"Blueprint '{blueprint_id}' attribute '{name}' "
+                        f"(type={attribute_kind}, "
+                        f"input={value!r}) was not applied: {error}"
+                    )
+            transform = self._spawn_transform(data)
             kwargs = {}
             if parent is not None:
                 attachment_name = data.get("attachment_type")
@@ -433,6 +471,28 @@ class ScenarioRestorer:
                     actor.destroy()
                 finally:
                     raise RuntimeError("Spawned actor has an unexpected blueprint.")
+            runtime_attributes = dict(getattr(actor, "attributes", {}) or {})
+            for name, (attribute, expected, source_value) in applied.items():
+                if name not in runtime_attributes:
+                    continue
+                try:
+                    actual = blueprint_value_to_string(
+                        attribute,
+                        runtime_attributes[name],
+                    )
+                    if actual != expected:
+                        warnings.append(
+                            f"Blueprint '{blueprint_id}' attribute '{name}' "
+                            f"(type={blueprint_attribute_kind(attribute)}, "
+                            f"input={source_value!r}) verification mismatch: "
+                            f"requested {expected!r}, CARLA reports {actual!r}."
+                        )
+                except Exception as error:
+                    warnings.append(
+                        f"Blueprint '{blueprint_id}' attribute '{name}' "
+                        f"(type={blueprint_attribute_kind(attribute)}, "
+                        f"input={source_value!r}) could not be verified: {error}"
+                    )
             return actor, warnings
         finally:
             for name, value in originals.items():
@@ -440,6 +500,12 @@ class ScenarioRestorer:
                     blueprint.set_attribute(name, value)
                 except Exception:
                     pass
+
+    def _spawn_transform(self, data):
+        transform = transform_from_dict(data["transform"], self.carla)
+        if str(data.get("blueprint_id", "")).startswith("vehicle."):
+            transform.location.z += self.VEHICLE_SPAWN_Z_OFFSET
+        return transform
 
     def _register_actor(self, database, actor, data, parent, runtime_warnings):
         completeness = data["completeness"]
@@ -488,7 +554,12 @@ class ScenarioRestorer:
                 actor.destroy()
         finally:
             with database.lock:
-                database.actors_db.remove_actor(actor.id)
+                if str(getattr(actor, "type_id", "")).startswith("sensor."):
+                    database.sensors_db.remove_sensor(actor.id)
+                else:
+                    database.actors_db.remove_actor(actor.id)
+                    database.vehicle_control_states.pop(actor.id, None)
+                    database.walker_ai_states.pop(actor.id, None)
 
     @staticmethod
     def _walker_controller_is_restorable(data):

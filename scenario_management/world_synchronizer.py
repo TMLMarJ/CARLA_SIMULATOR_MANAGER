@@ -23,14 +23,21 @@ class WorldSynchronizer:
         self.classifier = classifier or ActorClassifier
 
     def synchronize(self, world, database, internal_actor_ids=None,
-                    reason="manual"):
+                    reason="manual", infrastructure_actor_ids=None):
         from actors.actors import ActorInfo, SensorInfo
 
         world_id = self._world_id(world)
         report = WorldSyncReport(reason=reason, world_id=world_id)
         actors = list(world.get_actors())
+        if reason == "after_load_scenario":
+            actors = self._include_fresh_loaded_actors(
+                actors,
+                database,
+                world_id,
+            )
         frame = self._snapshot_frame(world)
         internal_actor_ids = set(internal_actor_ids or ())
+        infrastructure_actor_ids = set(infrastructure_actor_ids or ())
         inventory = []
 
         for actor in actors:
@@ -41,6 +48,12 @@ class WorldSynchronizer:
                     actor,
                     internal_actor_ids,
                 )
+                if (
+                    actor_id in infrastructure_actor_ids
+                    and category == ActorCategory.STATIC_OBJECT
+                ):
+                    report.skipped_infrastructure += 1
+                    continue
                 if category == ActorCategory.INTERNAL_PREVIEW:
                     report.skipped_internal += 1
                     continue
@@ -181,6 +194,51 @@ class WorldSynchronizer:
         for sensor_id in report.removed_sensor_ids:
             database.sensor_event_queue.put(("sensor_removed", sensor_id))
         return report
+
+    @staticmethod
+    def _include_fresh_loaded_actors(actors, database, world_id):
+        """Keep just-spawned Load records during CARLA inventory propagation."""
+        visible_ids = {
+            ActorClassifier.actor_id(actor)
+            for actor in actors
+        }
+        with database.lock:
+            registered = []
+            for references, records in (
+                (
+                    database.actors_db.actors,
+                    database.actors_db.actors_db,
+                ),
+                (
+                    database.sensors_db.sensors,
+                    database.sensors_db.sensors_db,
+                ),
+            ):
+                for runtime_id, info in records.items():
+                    if (
+                        runtime_id in visible_ids
+                        or info.world_id != world_id
+                        or info.ownership != ActorOwnership.MANAGED
+                        or info.origin != ActorOrigin.SCENARIO_LOADED
+                    ):
+                        continue
+                    actor = references.get(runtime_id)
+                    if actor is not None:
+                        registered.append(actor)
+
+        for actor in registered:
+            try:
+                alive = bool(actor.is_alive)
+            except (AttributeError, RuntimeError):
+                alive = False
+            if not alive:
+                continue
+            runtime_id = ActorClassifier.actor_id(actor)
+            if runtime_id is None or runtime_id in visible_ids:
+                continue
+            actors.append(actor)
+            visible_ids.add(runtime_id)
+        return actors
 
     @staticmethod
     def _refresh_actor_record(existing, actor, category, frame):

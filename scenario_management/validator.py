@@ -42,6 +42,7 @@ class ScenarioValidator:
         ActorOrigin.GUI_SPAWNED,
         ActorOrigin.SERVER_DISCOVERED,
         ActorOrigin.SCENARIO_LOADED,
+        ActorOrigin.ADOPTED_EXTERNAL,
     }
     DATA_SOURCES = {
         DataSource.SERVER,

@@ -2,6 +2,8 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from utilities.functions import (
+    actor_ownership_status,
+    actor_sensor_status,
     filter_carla_id_by_type,
     get_pedestrian_blueprint_ids,
     pedestrian_blueprint_options,
@@ -36,12 +38,17 @@ class CustomPedestrianFrame(tk.Frame):
         self._pedestrian_frame_setup()
 
     def spawn_ghost(self, blueprint_id=None, transform=None):
+        if not self.ghost_preview_enabled.get():
+            return False
         if blueprint_id is None:
             try:
                 blueprint_id = self._selected_blueprint_id()
             except ValueError:
                 return
-        self.actor_preview.spawn(blueprint_id=blueprint_id, transform=transform)
+        return self.actor_preview.spawn(
+            blueprint_id=blueprint_id,
+            transform=transform or self._current_transform(),
+        )
 
     def _pedestrian_variables_definition(self):
         self.actor_name_var = tk.StringVar(value="Ghost Pedestrian")
@@ -64,6 +71,7 @@ class CustomPedestrianFrame(tk.Frame):
 
         self.choose_model = tk.StringVar()
         self.actor_model = {}
+        self.ghost_preview_enabled = tk.BooleanVar(value=True)
 
     def _available_pedestrian_blueprint_ids(self):
         blueprint_ids = list(
@@ -183,6 +191,13 @@ class CustomPedestrianFrame(tk.Frame):
         self.combobox_spawn_points.bind("<<ComboboxSelected>>", self._update_location_from_spawn_point)
         self.combobox_spawn_points.grid(row=5, column=0, columnspan=2, sticky="ew")
 
+        ttk.Checkbutton(
+            heading_frame,
+            text="Enable Ghost Preview",
+            variable=self.ghost_preview_enabled,
+            command=self._toggle_ghost_preview,
+        ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(10, 0))
+
         #==================================== Location ===================================
         position_frame = ttk.Frame(location_frame, style="new.TFrame")
         position_frame.grid(row=0, column=0, sticky="nw")
@@ -241,7 +256,7 @@ class CustomPedestrianFrame(tk.Frame):
 
         button_control_frame = ttk.Frame(lower_frame, style="new.TFrame")
         button_control_frame.grid(row=1, column=0, sticky="ew", padx=20, pady=(0, 12))
-        for index in range(5):
+        for index in range(4):
             button_control_frame.grid_columnconfigure(index, weight=1)
 
         #==================================== Buttons ===================================
@@ -255,15 +270,13 @@ class CustomPedestrianFrame(tk.Frame):
         change_model_button.grid(row=0, column=1, sticky="ew", pady=(0, 8), padx=(0, 10))
         update_location_button = ttk.Button(button_control_frame, text="Update Location", command=self.update_location, width=18)
         update_location_button.grid(row=0, column=2, sticky="ew", pady=(0, 8), padx=(0, 10))
-        copy_button = ttk.Button(button_control_frame, text="Copy Pedestrian", command=self.copy_actor, width=18)
-        copy_button.grid(row=0, column=3, sticky="ew", pady=(0, 8), padx=(0, 10))
         movement_button = ttk.Button(
             button_control_frame,
             text="Movement Control",
             command=self.open_movement_control,
             width=18,
         )
-        movement_button.grid(row=0, column=4, sticky="ew", pady=(0, 8))
+        movement_button.grid(row=0, column=3, sticky="ew", pady=(0, 8))
 
     def open_movement_control(self):
         selected_actor = self.actor_table.tree.selection()
@@ -297,9 +310,6 @@ class CustomPedestrianFrame(tk.Frame):
             self.actor_table.tree.item(selected_actor)["values"][5],
             self.actor_table.tree.item(selected_actor)["values"][6]
         ))
-
-    def copy_actor(self, event=None):
-        pass
 
     def change_model(self, event=None):
         if not self.actor_table.tree.selection():
@@ -416,6 +426,31 @@ class CustomPedestrianFrame(tk.Frame):
             self.selected_spawn_point.set("")
         self._refresh_blueprint_models(preserve_selection=True)
 
+    def _current_transform(self):
+        return carla.Transform(
+            carla.Location(
+                x=self.x_position_var.get(),
+                y=self.y_position_var.get(),
+                z=self.z_position_var.get(),
+            ),
+            carla.Rotation(
+                pitch=self.pitch_position_var.get(),
+                yaw=self.yaw_position_var.get(),
+                roll=self.roll_position_var.get(),
+            ),
+        )
+
+    def _toggle_ghost_preview(self):
+        enabled = bool(self.ghost_preview_enabled.get())
+        self.actor_preview.set_enabled(enabled)
+        if enabled:
+            self.spawn_ghost()
+        else:
+            self.destroy_ghost()
+
+    def is_ghost_preview_enabled(self):
+        return bool(self.ghost_preview_enabled.get())
+
     def destroy_ghost(self):
         if self.actor_preview:
             self.actor_preview.destroy()
@@ -427,7 +462,7 @@ class CustomPedestrianFrame(tk.Frame):
         except ValueError as error:
             messagebox.showerror("Pedestrian Model", str(error))
             return
-        if self.actor_preview:
+        if self.is_ghost_preview_enabled():
             transform = self.actor_preview.get_transform()
             self.destroy_ghost()
             self.spawn_ghost(blueprint_id=selected_model, transform=transform)
@@ -447,7 +482,7 @@ class CustomPedestrianFrame(tk.Frame):
             "location": f"{x_pos:.2f}, {y_pos:.2f}, {z_pos:.2f}",
             "rotation": f"{pitch_pos:.2f}, {yaw_pos:.2f}, {roll_pos:.2f}",
             "sensors": "",  # TODO: Implement sensor information retrieval when the sensor management is implemented
-            "is_active": "Pending",
+            "status": "Managed",
         }
         return actor_info
 
@@ -517,7 +552,7 @@ class CustomPedestrianFrame(tk.Frame):
             else:
                 actor_data["carla_id"] = actor_id
                 actor_data["type_id"] = actor.type_id
-                actor_data["is_active"] = "Active"
+                actor_data["status"] = "Managed"
                 self.actor_table.add_actor_to_table(actor_data)
                 with self.database.lock:
                     self.database.spawned_actor_id = None
@@ -537,8 +572,8 @@ class CustomPedestrianFrame(tk.Frame):
                 actor_id,
                 "Selected pedestrian removed",
             )
-            self.controller.carla.remove_actor(actor_id)
-            self.actor_table.tree.delete(selected_actor)
+            if self.controller.carla.remove_actor(actor_id):
+                self.actor_table.tree.delete(selected_actor)
 
     def edit_actor(self):
         try:
@@ -558,10 +593,15 @@ class CustomPedestrianFrame(tk.Frame):
 
     def apply_actor_changes(self, data):
         self.database.blueprint_new_data = data["blueprint"]
-        self.controller.carla.apply_new_physics_and_blueprint_to_ghost(data["physics"])
+        if not self.is_ghost_preview_enabled():
+            return True
+        self.controller.carla.apply_new_physics_and_blueprint_to_ghost(
+            data["physics"]
+        )
         if wait_and_try(lambda: self.database.physics_applied is True):
             self.image_frame.update_image()
             self.database.physics_applied = False
+        return True
 
     def reset_tab(self):
         self.actor_name_var.set("Ghost Pedestrian")
@@ -710,8 +750,8 @@ class ActorTable(ttk.Frame):
         model = actor_info["type_id"]
         location = f"({actor_info['location']})"
         rotation = f"({actor_info['rotation']})"
-        sensors = ""    #TODO: Implement sensor information retrieval when the sensor management is implemented
-        status = actor_info["is_active"]
+        sensors = actor_sensor_status(self.database, actor_id)
+        status = actor_info.get("status", actor_info.get("is_active", "Unknown"))
         self.tree.insert("", "end", values=(name, actor_id, model, location, rotation, sensors, status))
 
     def remove_actor_from_table(self, actor_info):
@@ -729,8 +769,8 @@ class ActorTable(ttk.Frame):
                 model = actor_info["type_id"]
                 location = f"({actor_info['location']})",
                 rotation = f"({actor_info['rotation']})",
-                sensors = ""    #TODO: Implement sensor information retrieval when the sensor management is implemented
-                status = actor_info["is_active"]
+                sensors = actor_sensor_status(self.database, actor_id)
+                status = actor_info.get("status", actor_info.get("is_active", "Unknown"))
                 self.tree.item(item, values=(name, actor_id, model, location, rotation, sensors, status))
                 break
 
@@ -754,7 +794,7 @@ class ActorTable(ttk.Frame):
                         if transform is not None else "Unknown"
                     ),
                     "sensors": "",  # TODO: Implement sensor information retrieval when the sensor management is implemented
-                    "is_active": ("Active" if actor_info.is_alive else "Inactive")
+                    "status": actor_ownership_status(actor_info)
                 }
                 self.add_actor_to_table(pedestrian_info)
 

@@ -2,6 +2,33 @@ from typing import Dict
 import time
 
 import carla
+from scenario_management.models import ActorOwnership
+
+
+def actor_ownership_status(actor_info):
+    """Return the user-facing status from the synchronized ownership model."""
+    ownership = getattr(actor_info, "ownership", None)
+    if ownership == ActorOwnership.MANAGED:
+        return "Managed"
+    if ownership == ActorOwnership.EXTERNAL:
+        return "External"
+    if ownership == ActorOwnership.INTERNAL:
+        return "Internal"
+    return "Unknown"
+
+
+def actor_sensor_status(database, actor_id):
+    """Return whether the actor has a sensor attached in synchronized data."""
+    try:
+        actor_id = int(actor_id)
+    except (TypeError, ValueError):
+        return "No"
+    with database.lock:
+        has_sensor = any(
+            getattr(sensor_info, "parent_id", None) == actor_id
+            for sensor_info in database.sensors_db.sensors_db.values()
+        )
+    return "Yes" if has_sensor else "No"
 
 
 def get_pedestrian_blueprint_ids(blueprint_lib):

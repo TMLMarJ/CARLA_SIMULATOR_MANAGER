@@ -181,7 +181,8 @@ class SensorPreviewTop(tk.Toplevel):
 
         info_frame = ttk.Frame(self, style="new.TFrame")
         info_frame.pack(fill="x", padx=14, pady=(12, 8))
-        ttk.Label(info_frame, text=f"Name: {sensor_name}").pack(side="left", padx=(0, 20))
+        self.name_label = ttk.Label(info_frame, text=f"Name: {sensor_name}")
+        self.name_label.pack(side="left", padx=(0, 20))
         ttk.Label(info_frame, text=f"ID: {sensor_id}").pack(side="left", padx=(0, 20))
         ttk.Label(info_frame, text=f"Type: {blueprint_id}").pack(side="left")
 
@@ -203,6 +204,10 @@ class SensorPreviewTop(tk.Toplevel):
             self.preview_buffer
         )
         self._schedule_refresh()
+
+    def update_display_name(self, sensor_name):
+        self.title(f"Sensor Preview - {sensor_name}")
+        self.name_label.configure(text=f"Name: {sensor_name}")
 
     def _schedule_refresh(self):
         if not self.closed and self.winfo_exists():
@@ -343,7 +348,8 @@ class SensorValuesPreviewTop(tk.Toplevel):
 
         info_frame = ttk.Frame(self, style="new.TFrame")
         info_frame.pack(fill="x", padx=14, pady=(12, 8))
-        ttk.Label(info_frame, text=f"Name: {sensor_name}").pack(side="left", padx=(0, 20))
+        self.name_label = ttk.Label(info_frame, text=f"Name: {sensor_name}")
+        self.name_label.pack(side="left", padx=(0, 20))
         ttk.Label(info_frame, text=f"ID: {sensor_id}").pack(side="left", padx=(0, 20))
         ttk.Label(info_frame, text=f"Type: {blueprint_id}").pack(side="left")
 
@@ -368,6 +374,10 @@ class SensorValuesPreviewTop(tk.Toplevel):
             self.preview_buffer
         )
         self._schedule_refresh()
+
+    def update_display_name(self, sensor_name):
+        self.title(f"Sensor Preview - {sensor_name}")
+        self.name_label.configure(text=f"Name: {sensor_name}")
 
     def _schedule_refresh(self):
         if not self.closed and self.winfo_exists():
@@ -527,7 +537,8 @@ class SensorEventsPreviewTop(tk.Toplevel):
 
         info_frame = ttk.Frame(self, style="new.TFrame")
         info_frame.pack(fill="x", padx=14, pady=(12, 8))
-        ttk.Label(info_frame, text=f"Name: {sensor_name}").pack(side="left", padx=(0, 20))
+        self.name_label = ttk.Label(info_frame, text=f"Name: {sensor_name}")
+        self.name_label.pack(side="left", padx=(0, 20))
         ttk.Label(info_frame, text=f"ID: {sensor_id}").pack(side="left", padx=(0, 20))
         ttk.Label(info_frame, text=f"Type: {blueprint_id}").pack(side="left")
 
@@ -609,6 +620,10 @@ class SensorEventsPreviewTop(tk.Toplevel):
             ("Power", "Power", 120),
             ("Message", "Message", 600)
         )
+
+    def update_display_name(self, sensor_name):
+        self.title(f"Sensor Preview - {sensor_name}")
+        self.name_label.configure(text=f"Name: {sensor_name}")
 
     def _schedule_refresh(self):
         if not self.closed and self.winfo_exists():
@@ -800,7 +815,8 @@ class SpatialSensorPreviewTop(tk.Toplevel):
 
         info_frame = ttk.Frame(self, style="new.TFrame")
         info_frame.pack(fill="x", padx=14, pady=(12, 8))
-        ttk.Label(info_frame, text=f"Name: {sensor_name}").pack(side="left", padx=(0, 20))
+        self.name_label = ttk.Label(info_frame, text=f"Name: {sensor_name}")
+        self.name_label.pack(side="left", padx=(0, 20))
         ttk.Label(info_frame, text=f"ID: {sensor_id}").pack(side="left", padx=(0, 20))
         ttk.Label(info_frame, text=f"Type: {blueprint_id}").pack(side="left")
         self.point_count_var = tk.StringVar(value="Starting preview...")
@@ -880,6 +896,10 @@ class SpatialSensorPreviewTop(tk.Toplevel):
             self.axes.set_ylim(-sensor_range, sensor_range)
             vertical_range = min(sensor_range, 50.0)
             self.axes.set_zlim(-vertical_range, vertical_range)
+
+    def update_display_name(self, sensor_name):
+        self.title(f"Sensor Preview - {sensor_name}")
+        self.name_label.configure(text=f"Name: {sensor_name}")
 
     def _schedule_refresh(self):
         if not self.closed and self.winfo_exists():

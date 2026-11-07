@@ -1,6 +1,7 @@
 import carla
 import tkinter as tk
 import threading
+import uuid
 from PIL import Image, ImageTk
 import numpy as np
 
@@ -15,19 +16,28 @@ class GhostPreview:
         self.transform = None
         self._image_lock = threading.Lock()
         self._image_revision = 0
+        self.enabled = True
 
     @property
     def world(self):
         return self.database.world
 
     def spawn(self, blueprint_id="vehicle.audi.a2", transform=None):
+        if not self.enabled:
+            return False
         if transform is None:
+            if not self.database.available_spawn_points:
+                return False
             transform = self.database.available_spawn_points[0]
-        self.controller.carla.spawn_preview_actor(
+        return self.controller.carla.spawn_preview_actor(
             blueprint_id,
             transform,
             self.on_camera_image,
+            request_id=uuid.uuid4().hex,
         )
+
+    def set_enabled(self, enabled):
+        self.enabled = bool(enabled)
 
 
 
@@ -51,7 +61,8 @@ class GhostPreview:
             return self._image_revision, self.image.copy()
 
     def set_transform(self, transform):
-        self.controller.carla.set_ghost_transform(transform)
+        if self.enabled:
+            self.controller.carla.set_ghost_transform(transform)
 
     def get_transform(self):
         self.ghost = self.database.ghost_data
@@ -62,7 +73,9 @@ class GhostPreview:
 
 
     def destroy(self):
-        self.controller.carla.destroy_preview_actor()
+        self.controller.carla.destroy_preview_actor(
+            request_id=uuid.uuid4().hex,
+        )
         with self._image_lock:
             self.image = None
             self._image_revision += 1

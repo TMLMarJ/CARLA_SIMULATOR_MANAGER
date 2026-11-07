@@ -6,6 +6,7 @@ from scenario_management.actor_classifier import ActorClassifier
 from scenario_management.converters import (
     attachment_type_to_string,
     blueprint_attributes_to_dict,
+    blueprint_runtime_value_to_string,
     transform_to_dict,
     vehicle_physics_to_dict,
     weather_to_dict,
@@ -22,6 +23,12 @@ from scenario_management.models import (
     ScenarioDocument,
     ScenarioMetadata,
     ScenarioWorld,
+)
+from vehicle_control import (
+    AUTOPILOT,
+    AUTOPILOT_DESTINATION,
+    AUTOPILOT_FREE_ROAM,
+    NO_CONTROL,
 )
 from scenario_management.world_synchronizer import WorldSynchronizer
 from simulation_manager import SimulationManager
@@ -247,14 +254,28 @@ class ScenarioCapture:
         try:
             attributes = blueprint_attributes_to_dict(actor)
             data_sources["blueprint_attributes"] = DataSource.SERVER
-        except (AttributeError, RuntimeError, TypeError, ValueError):
-            attributes = {
-                str(key): str(value)
-                for key, value in sorted(
-                    info.blueprint_attributes.items(),
-                    key=lambda item: str(item[0]),
+        except (AttributeError, RuntimeError, TypeError, ValueError) as error:
+            try:
+                attributes = {
+                    str(key): blueprint_runtime_value_to_string(value)
+                    for key, value in sorted(
+                        info.blueprint_attributes.items(),
+                        key=lambda item: str(item[0]),
+                    )
+                }
+                data_sources["blueprint_attributes"] = DataSource.GUI
+                warnings.append(
+                    "Runtime blueprint attributes could not be captured; "
+                    f"stored GUI values were used: {error}"
                 )
-            }
+            except (AttributeError, TypeError, ValueError) as fallback_error:
+                attributes = {}
+                status = ConfigurationStatus.PARTIAL
+                warnings.append(
+                    "Blueprint attributes could not be captured or converted: "
+                    f"{fallback_error}"
+                )
+                data_sources["blueprint_attributes"] = DataSource.UNKNOWN
 
         physics = None
         if category == ActorCategory.VEHICLE:
@@ -414,10 +435,19 @@ class ScenarioCapture:
                     "traffic_manager_port": None,
                     "source": DataSource.UNKNOWN,
                 }
+            mode = state.get("mode")
+            autopilot_enabled = state.get("autopilot_enabled")
+            traffic_manager_port = state.get("traffic_manager_port")
+            if mode == AUTOPILOT_DESTINATION:
+                mode = NO_CONTROL
+                autopilot_enabled = False
+                traffic_manager_port = None
+            elif mode == AUTOPILOT_FREE_ROAM:
+                mode = AUTOPILOT
             return {
-                "mode": state.get("mode"),
-                "autopilot_enabled": state.get("autopilot_enabled"),
-                "traffic_manager_port": state.get("traffic_manager_port"),
+                "mode": mode,
+                "autopilot_enabled": autopilot_enabled,
+                "traffic_manager_port": traffic_manager_port,
                 "source": DataSource.GUI,
             }
         if category == ActorCategory.PEDESTRIAN:

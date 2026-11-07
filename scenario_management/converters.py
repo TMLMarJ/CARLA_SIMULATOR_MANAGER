@@ -1,5 +1,8 @@
 """Conversions from CARLA runtime objects to schema-v1 primitive values."""
 
+import math
+import re
+
 
 VEHICLE_PHYSICS_FIELDS = (
     "max_rpm",
@@ -83,9 +86,136 @@ def weather_to_dict(weather):
 def blueprint_attributes_to_dict(actor):
     attributes = dict(actor.attributes or {})
     return {
-        str(name): str(attributes[name])
+        str(name): blueprint_runtime_value_to_string(attributes[name])
         for name in sorted(attributes, key=str)
     }
+
+
+def blueprint_attribute_kind(attribute):
+    return str(getattr(attribute, "type", "String")).split(".")[-1].lower()
+
+
+def _rgb_components(value):
+    if all(hasattr(value, name) for name in ("r", "g", "b")):
+        values = [value.r, value.g, value.b]
+    elif isinstance(value, dict):
+        values = [value[name] for name in ("r", "g", "b")]
+    elif isinstance(value, (list, tuple)) and len(value) == 3:
+        values = list(value)
+    elif isinstance(value, str):
+        text = value.strip()
+        color_match = re.fullmatch(
+            r"Color\s*\(\s*(?:r\s*=\s*)?([^,]+),"
+            r"\s*(?:g\s*=\s*)?([^,]+),"
+            r"\s*(?:b\s*=\s*)?([^)]+)\s*\)",
+            text,
+            flags=re.IGNORECASE,
+        )
+        values = (
+            list(color_match.groups())
+            if color_match
+            else [part.strip() for part in text.split(",")]
+        )
+    else:
+        raise ValueError("RGBColor requires r, g and b components.")
+    if len(values) != 3:
+        raise ValueError("RGBColor requires exactly three components.")
+    try:
+        components = [int(value) for value in values]
+    except (TypeError, ValueError) as error:
+        raise ValueError("RGBColor components must be integers.") from error
+    if not all(0 <= value <= 255 for value in components):
+        raise ValueError("RGBColor components must be in range 0..255.")
+    return components
+
+
+def blueprint_value_to_string(attribute, value):
+    """Convert a saved value to the textual format expected by CARLA."""
+    kind = blueprint_attribute_kind(attribute)
+    if kind in ("bool", "boolean"):
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        if isinstance(value, str) and value.strip().lower() in ("true", "false"):
+            return value.strip().lower()
+        raise ValueError("Bool value must be true or false.")
+    if kind in ("int", "integer"):
+        if isinstance(value, bool):
+            raise ValueError("Bool is not a valid Int value.")
+        if isinstance(value, float) and not value.is_integer():
+            raise ValueError("Int value is not an integer.")
+        try:
+            return str(int(value))
+        except (TypeError, ValueError) as error:
+            raise ValueError("Int value is not an integer.") from error
+    if kind in ("float", "double"):
+        if isinstance(value, bool):
+            raise ValueError("Bool is not a valid Float value.")
+        try:
+            number = float(value)
+        except (TypeError, ValueError) as error:
+            raise ValueError("Float value is not numeric.") from error
+        if not math.isfinite(number):
+            raise ValueError("Float value must be finite.")
+        return format(number, ".15g")
+    if kind in ("rgbcolor", "rgb_color", "color"):
+        return ",".join(str(component) for component in _rgb_components(value))
+    if kind in ("string", "str"):
+        if not isinstance(value, str):
+            raise ValueError("String attribute requires a string value.")
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Unsupported CARLA attribute type '{kind}' requires text input."
+        )
+    return value
+
+
+def blueprint_attribute_current_value(attribute):
+    """Read an ActorAttribute without asking incompatible types for as_str()."""
+    kind = blueprint_attribute_kind(attribute)
+    method_names = {
+        "bool": "as_bool",
+        "boolean": "as_bool",
+        "int": "as_int",
+        "integer": "as_int",
+        "float": "as_float",
+        "double": "as_float",
+        "rgbcolor": "as_color",
+        "rgb_color": "as_color",
+        "color": "as_color",
+        "string": "as_str",
+        "str": "as_str",
+    }
+    method = getattr(attribute, method_names.get(kind, "as_str"), None)
+    if callable(method):
+        value = method()
+    elif hasattr(attribute, "value"):
+        value = attribute.value
+    else:
+        raise ValueError(
+            f"CARLA attribute type '{kind}' cannot be read safely."
+        )
+    return blueprint_value_to_string(attribute, value)
+
+
+def blueprint_runtime_value_to_string(value):
+    """Serialize actor.attributes values without leaking Python Color reprs."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("Blueprint Float value must be finite.")
+        return format(value, ".15g")
+    if all(hasattr(value, name) for name in ("r", "g", "b")):
+        return ",".join(str(component) for component in _rgb_components(value))
+    raise ValueError(
+        f"Unsupported blueprint runtime value {value!r} "
+        f"({type(value).__name__})."
+    )
 
 
 def gear_physics_to_dict(gear):

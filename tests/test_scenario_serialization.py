@@ -17,6 +17,8 @@ from scenario_management.converters import (
     weather_to_dict,
 )
 from scenario_management.models import (
+    ActorCategory,
+    ActorOrigin,
     ActorOwnership,
     ConfigurationStatus,
 )
@@ -461,6 +463,13 @@ class CaptureTests(unittest.TestCase):
         vehicle = FakeActor(1, "vehicle.test", FakeTransform(x=1.0))
         world = FakeWorld([vehicle])
         self.synchronizer.synchronize(world, self.database)
+        with self.database.lock:
+            self.database.adopt_runtime_actor(
+                vehicle.id,
+                vehicle,
+                ActorCategory.VEHICLE,
+                ActorOrigin.ADOPTED_EXTERNAL,
+            )
         vehicle.transform = FakeTransform(x=99.0)
 
         document = self.capture.capture(world, self.database, "Moving")
@@ -472,7 +481,7 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(ConfigurationStatus.PARTIAL,
                          actor.completeness.status)
 
-    def test_external_sensor_has_parent_and_derived_relative_transform(self):
+    def test_external_parent_and_sensor_are_outside_capture_scope(self):
         vehicle = FakeActor(10, "vehicle.test", FakeTransform(x=10.0))
         sensor = FakeActor(
             11,
@@ -482,16 +491,8 @@ class CaptureTests(unittest.TestCase):
         )
 
         document = self.capture_world(FakeWorld([vehicle, sensor]))
-        records = {actor.captured_runtime_id: actor for actor in document.actors}
-
-        self.assertEqual(
-            records[10].scenario_id,
-            records[11].parent_scenario_id,
-        )
-        self.assertEqual("relative", records[11].transform["space"])
-        self.assertEqual("derived", records[11].transform["source"])
-        self.assertEqual(ActorOwnership.EXTERNAL, records[11].ownership)
-        self.assertIsNone(records[11].attachment_type)
+        self.assertEqual([], document.actors)
+        self.assertEqual(2, document.capture_report.skipped_external)
 
     def test_managed_sensor_prefers_equivalent_gui_relative_transform(self):
         vehicle = FakeActor(12, "vehicle.test", FakeTransform(x=10.0))
@@ -560,8 +561,8 @@ class CaptureTests(unittest.TestCase):
         ))
 
     def test_runtime_only_unrestorable_and_internal_are_omitted(self):
-        runtime_only = FakeActor(20, "custom.runtime")
-        unrestorable = FakeActor(21, "custom.unrestorable")
+        runtime_only = FakeActor(20, "vehicle.runtime")
+        unrestorable = FakeActor(21, "vehicle.unrestorable")
         preview = FakeActor(
             22,
             "sensor.camera.rgb",
@@ -569,6 +570,12 @@ class CaptureTests(unittest.TestCase):
         )
         world = FakeWorld([runtime_only, unrestorable, preview])
         self.synchronizer.synchronize(world, self.database)
+        self.database.actors_db.actors_db[20].ownership = (
+            ActorOwnership.MANAGED
+        )
+        self.database.actors_db.actors_db[21].ownership = (
+            ActorOwnership.MANAGED
+        )
         self.database.actors_db.actors_db[20].configuration_status = (
             ConfigurationStatus.RUNTIME_ONLY
         )
@@ -595,6 +602,8 @@ class CaptureTests(unittest.TestCase):
                 "active": True,
                 "speed": 2.5,
                 "random_navigation": True,
+                "controller_id": 32,
+                "target": {"x": 1.0, "y": 2.0, "z": 0.0},
             })
 
         document = self.capture_world(world)
@@ -607,7 +616,7 @@ class CaptureTests(unittest.TestCase):
             records[30].scenario_id,
             records[32].parent_scenario_id,
         )
-        self.assertIsNone(records[32].control["active"])
+        self.assertTrue(records[32].control["active"])
 
 
 class ControllerSaveCommandTests(unittest.TestCase):
@@ -709,6 +718,7 @@ class ScenarioGuiStateTests(unittest.TestCase):
         frame.path_entry = FakeWidget()
         frame.browse_button = FakeWidget()
         frame.save_button = FakeWidget()
+        frame.load_button = FakeWidget()
         frame.clear_button = FakeWidget()
         frame.format_combo = FakeWidget()
         frame.clear_mode_combo = FakeWidget()
@@ -758,6 +768,7 @@ class ScenarioManagerTests(unittest.TestCase):
         database = DataStorage()
         synchronizer = WorldSynchronizer()
         manager = ScenarioManager()
+        database.add_actor(vehicle, "Vehicle GUI")
 
         def synchronize(current_world, reason, publish):
             self.assertEqual("before_save", reason)

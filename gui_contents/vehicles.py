@@ -1,15 +1,20 @@
-import time
+import queue
 import tkinter as tk
-from tkinter import ttk
+import uuid
+from tkinter import messagebox, ttk
 from PIL import Image, ImageTk
 from pygments.lexers import blueprint
 
-from utilities.functions import filter_carla_id_by_type, return_data_from_transform, wait_and_try
+from utilities.functions import (
+    actor_ownership_status,
+    actor_sensor_status,
+    filter_carla_id_by_type,
+    return_data_from_transform,
+)
 from gui_contents.spawn_preview import VehiclePreviewFrame, GhostPreview
 from gui_contents.ActorEditView import EntityEditWindow
 from gui_contents.change_model_top import ChangeModelTop
 from gui_contents.set_transform_top import ChangeTransformTop
-import messagebox
 import carla
 import numpy as np
 
@@ -28,12 +33,26 @@ class CustomVehicleFrame(tk.Frame):
         self.subtle_color = "#E7B36C"
 
         self.vehicle_preview = GhostPreview(self.database, controller)
+        self.actor_event_check = None
+        self.pending_requests = {}
+        self.configured_physics = None
+        self.configured_blueprint_attributes = {}
 
         self._vehicle_variables_definition()
         self._vehicle_frame_setup()
+        self.check_actor_events()
 
-    def spawn_ghost(self, blueprint_id="vehicle.audi.a2", transform=None):
-        self.vehicle_preview.spawn(blueprint_id=blueprint_id, transform=transform)
+    def spawn_ghost(self, blueprint_id=None, transform=None):
+        if not self.ghost_preview_enabled.get():
+            return False
+        if blueprint_id is None:
+            blueprint_id = self.actor_model.get(self.choose_model.get())
+        if blueprint_id is None:
+            return False
+        return self.vehicle_preview.spawn(
+            blueprint_id=blueprint_id,
+            transform=transform or self._current_transform(),
+        )
 
     def _vehicle_variables_definition(self):
         self.vehicle_name_var = tk.StringVar(value="Ghost Vehicle")
@@ -57,6 +76,7 @@ class CustomVehicleFrame(tk.Frame):
         self.choose_class = tk.StringVar()
         self.choose_model = tk.StringVar()
         self.actor_model = {}
+        self.ghost_preview_enabled = tk.BooleanVar(value=True)
 
     def _vehicle_frame_setup(self):
         vehicle_classes = ["Car", "Bus", "Van", "Truck", "Motorcycle", "Bicycle"]
@@ -157,6 +177,13 @@ class CustomVehicleFrame(tk.Frame):
         self.combobox_spawn_points.bind("<<ComboboxSelected>>", self._update_location_from_spawn_point)
         self.combobox_spawn_points.grid(row=5, column=0, columnspan=2, sticky="ew")
 
+        ttk.Checkbutton(
+            heading_frame,
+            text="Enable Ghost Preview",
+            variable=self.ghost_preview_enabled,
+            command=self._toggle_ghost_preview,
+        ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(10, 0))
+
         #==================================== Location ===================================
         position_frame = ttk.Frame(location_frame, style="new.TFrame")
         position_frame.grid(row=0, column=0, sticky="nw")
@@ -221,16 +248,21 @@ class CustomVehicleFrame(tk.Frame):
         #==================================== Buttons ===================================
         spawn_button = ttk.Button(button_frame, text="Spawn Vehicle", command=self.spawn_vehicle, width=18)
         spawn_button.grid(row=0, column=0, sticky="ew", pady=(0, 8), padx=(0, 10))
-        physics_button = ttk.Button(button_frame, text="Edit", command=self.edit_vehicle, width=18)
+        physics_button = ttk.Button(button_frame, text="Edit Spawn Setup", command=self.edit_vehicle, width=18)
         physics_button.grid(row=0, column=1, sticky="ew", pady=(0, 8), padx=(0, 10))
         remove_button = ttk.Button(button_control_frame, text="Remove", command=self.remove_vehicle, width=18)
         remove_button.grid(row=0, column=0, sticky="ew", pady=(0, 8), padx=(0, 10))
         change_model_button = ttk.Button(button_control_frame, text="Change Model", command=self.change_model, width=18)
         change_model_button.grid(row=0, column=1, sticky="ew", pady=(0, 8), padx=(0, 10))
+        edit_physics_button = ttk.Button(
+            button_control_frame,
+            text="Edit Physics",
+            command=self.edit_spawned_vehicle_physics,
+            width=18,
+        )
+        edit_physics_button.grid(row=0, column=2, sticky="ew", pady=(0, 8), padx=(0, 10))
         update_location_button = ttk.Button(button_control_frame, text="Update Location", command=self.update_location, width=18)
-        update_location_button.grid(row=0, column=2, sticky="ew", pady=(0, 8), padx=(0, 10))
-        copy_button = ttk.Button(button_control_frame, text="Copy Vehicle", command=self.copy_vehicle, width=18)
-        copy_button.grid(row=0, column=3, sticky="ew", pady=(0, 8), padx=(0, 10))
+        update_location_button.grid(row=0, column=3, sticky="ew", pady=(0, 8), padx=(0, 10))
         movement_button = ttk.Button(
             button_control_frame,
             text="Movement Control",
@@ -262,7 +294,11 @@ class CustomVehicleFrame(tk.Frame):
         if not selected_vehicle:
             return
         selected_vehicle_id = self.vehicle_table.tree.item(selected_vehicle)["values"][1]
-        self.controller.carla.set_actor_transform(transform, selected_vehicle_id)
+        if not self.controller.carla.set_actor_transform(
+            transform,
+            selected_vehicle_id,
+        ):
+            return
         self.vehicle_table.tree.item(selected_vehicle, values=(
             self.vehicle_table.tree.item(selected_vehicle)["values"][0],
             self.vehicle_table.tree.item(selected_vehicle)["values"][1],
@@ -272,9 +308,6 @@ class CustomVehicleFrame(tk.Frame):
             self.vehicle_table.tree.item(selected_vehicle)["values"][5],
             self.vehicle_table.tree.item(selected_vehicle)["values"][6]
         ))
-
-    def copy_vehicle(self, event=None):
-        pass
 
     def change_model(self, event=None):
         if not self.vehicle_table.tree.selection():
@@ -288,34 +321,20 @@ class CustomVehicleFrame(tk.Frame):
         actor_model = filter_carla_id_by_type("vehicle", selected_class, self.database.blueprint_lib)
         blueprint_id = actor_model[selected_model]
         selected_vehicle_id = self.vehicle_table.tree.item(selected_vehicle)["values"][1]
-        self.controller.close_movement_control_for_actor(
+        request_id = self._new_request("change_model_config", {
+            "actor_id": int(selected_vehicle_id),
+            "blueprint_id": blueprint_id,
+        })
+        if not self.controller.carla.get_vehicle_edit_data(
             selected_vehicle_id,
-            "Selected vehicle is being replaced",
-        )
-        self.controller.carla.change_actor_model(blueprint_id, self.database.actors_db.actors[selected_vehicle_id].id)
-
-        try:
-            is_changed = wait_and_try(
-                lambda: self.database.spawned_actor_id is not None
-            )
-            if is_changed:
-                veh_id = self.database.actors_db.actors[self.database.spawned_actor_id].id
-                new_vehicle_model = selected_class.upper() + ":" + selected_model
-                self.vehicle_table.tree.item(selected_vehicle, values=(
-                    self.vehicle_table.tree.item(selected_vehicle)["values"][0],
-                    veh_id,
-                    new_vehicle_model,
-                    self.vehicle_table.tree.item(selected_vehicle)["values"][3],
-                    self.vehicle_table.tree.item(selected_vehicle)["values"][4],
-                    self.vehicle_table.tree.item(selected_vehicle)["values"][5],
-                    self.vehicle_table.tree.item(selected_vehicle)["values"][6]
-                ))
-                self.database.spawned_actor_id = None
-        except KeyError:
-            veh_id = None
-            print("Database update failed. Vehicle not found in database.")
+            request_id,
+        ):
+            self.pending_requests.pop(request_id, None)
 
     def _update_model(self, event):
+        self.database.blueprint_new_data = None
+        self.configured_blueprint_attributes = {}
+        self.configured_physics = None
         self.actor_model = filter_carla_id_by_type("vehicle", self.choose_class.get().lower(),
                                                          self.database.blueprint_lib)
         self.actor_model_combobox["values"] = list(self.actor_model.keys())
@@ -363,13 +382,41 @@ class CustomVehicleFrame(tk.Frame):
             self.database.available_spawn_points[0]
         )
 
+    def _current_transform(self):
+        return carla.Transform(
+            carla.Location(
+                x=self.x_position_var.get(),
+                y=self.y_position_var.get(),
+                z=self.z_position_var.get(),
+            ),
+            carla.Rotation(
+                pitch=self.pitch_position_var.get(),
+                yaw=self.yaw_position_var.get(),
+                roll=self.roll_position_var.get(),
+            ),
+        )
+
+    def _toggle_ghost_preview(self):
+        enabled = bool(self.ghost_preview_enabled.get())
+        self.vehicle_preview.set_enabled(enabled)
+        if enabled:
+            self.spawn_ghost()
+        else:
+            self.destroy_ghost()
+
+    def is_ghost_preview_enabled(self):
+        return bool(self.ghost_preview_enabled.get())
+
     def destroy_ghost(self):
         if self.vehicle_preview:
             self.vehicle_preview.destroy()
 
     def _on_model_change(self, event):
+        self.database.blueprint_new_data = None
+        self.configured_blueprint_attributes = {}
+        self.configured_physics = None
         selected_model = self.actor_model[self.actor_model_combobox.get()]
-        if self.vehicle_preview:
+        if self.is_ghost_preview_enabled():
             transform = self.vehicle_preview.get_transform()
             self.destroy_ghost()
             self.spawn_ghost(blueprint_id=selected_model, transform=transform)
@@ -382,59 +429,55 @@ class CustomVehicleFrame(tk.Frame):
         yaw_pos = self.yaw_position_var.get()
         pitch_pos = self.pitch_position_var.get()
         roll_pos = self.roll_position_var.get()
-        carla_id = self.database.ghost_data.id if self.database.ghost_data is not None else None
         vehicle_info = {
             "name": vehicle_name,
-            "carla_id": carla_id,
+            "carla_id": None,
             "type_id": self.choose_class.get()+":"+self.choose_model.get(),
-            "location": f"({x_pos:.2f}, {y_pos:.2f}, {z_pos:.2f})" if self.database.ghost_data is not None else None,
-            "rotation": f"({pitch_pos:.2f}, {yaw_pos:.2f}, {roll_pos:.2f})" if self.database.ghost_data is not None else None,
+            "location": f"({x_pos:.2f}, {y_pos:.2f}, {z_pos:.2f})",
+            "rotation": f"({pitch_pos:.2f}, {yaw_pos:.2f}, {roll_pos:.2f})",
             "sensors": "",  # TODO: Implement sensor information retrieval when the sensor management is implemented
-            "is_active": ("Active" if self.database.ghost_data.is_alive else "Inactive") if self.database.ghost_data is not None else "None"
+            "status": "Managed"
         }
         return vehicle_info
 
     def spawn_vehicle(self):
-        if self.database.ghost_data is not None:
-            vehicle_name = self.vehicle_name_var.get()
-            transform = carla.Transform(
-                carla.Location(
-                    x=self.x_position_var.get(),
-                    y=self.y_position_var.get(),
-                    z=self.z_position_var.get()
-                ),
-                carla.Rotation(
-                    pitch=self.pitch_position_var.get(),
-                    yaw=self.yaw_position_var.get(),
-                    roll=self.roll_position_var.get()
-                )
+        vehicle_name = self.vehicle_name_var.get()
+        transform = self._current_transform()
+        actor_model = filter_carla_id_by_type(
+            "vehicle",
+            self.choose_class.get().lower(),
+            self.database.blueprint_lib,
+        )
+        if self.choose_model.get() not in actor_model:
+            return
+        data = {
+            "name": vehicle_name,
+            "transform": transform,
+            "sensors": "",
+            "blueprint_id": actor_model[self.choose_model.get()],
+            "attributes": dict(
+                self.configured_blueprint_attributes
+                or self.database.blueprint_new_data
+                or {}
+            ),
+            "physics": (
+                self.configured_physics
+                if self.configured_physics is not None
+                else self.database.ghost_physic
+            ),
+        }
+        request_id = self._new_request("spawn")
+        data["request_id"] = request_id
+        self.destroy_ghost()
+        if not self.controller.carla.spawn_actor(data):
+            self.pending_requests.pop(request_id, None)
+            self.spawn_ghost(
+                blueprint_id=data["blueprint_id"],
+                transform=transform,
             )
-            sensors = "" #TODO: Implement sensor information retrieval when the sensor management is implemented
-            actor_model = filter_carla_id_by_type("vehicle", self.choose_class.get().lower(),
-                                                       self.database.blueprint_lib)
-            data = {
-                "name": vehicle_name,
-                "transform": transform,
-                "sensors": sensors,
-                "blueprint_id": actor_model[self.choose_model.get()]}
-
-            vehicle_data = self.get_vehicle_info()
-            self.destroy_ghost()
-            self.controller.carla.spawn_actor(data)
-            self.reset_tab()
-            try:
-                is_changed = wait_and_try(
-                    lambda: self.database.spawned_actor_id is not None
-                )
-                if is_changed:
-                    veh_id = self.database.actors_db.actors[self.database.spawned_actor_id].id
-                    vehicle_data["carla_id"] = veh_id
-                    self.vehicle_table.add_vehicle_to_table(vehicle_data)
-                    self.database.spawned_actor_id = None
-            except KeyError:
-                veh_id = None
-                print("Database update failed. Vehicle not found in database.")
-            self.spawn_ghost()
+            return
+        self.reset_tab()
+        self.spawn_ghost()
 
 
 
@@ -448,27 +491,206 @@ class CustomVehicleFrame(tk.Frame):
                 vehicle_id,
                 "Selected vehicle removed",
             )
-            self.controller.carla.remove_actor(vehicle_id)
-            self.vehicle_table.tree.delete(selected_vehicle)
+            if self.controller.carla.remove_actor(vehicle_id):
+                self.vehicle_table.tree.delete(selected_vehicle)
 
     def edit_vehicle(self):
         blueprint = self.actor_model[self.actor_model_combobox.get()]
-        top = EntityEditWindow(self, blueprint, None, "vehicle", self.database.blueprint_lib, self.database.ghost_physic, self.apply_vehicle_changes, self.database.blueprint_new_data)
+        EntityEditWindow(
+            self,
+            blueprint,
+            None,
+            "vehicle",
+            self.database.blueprint_lib,
+            self.database.ghost_physic,
+            self.apply_vehicle_changes,
+            self.database.blueprint_new_data,
+        )
+
+    def edit_spawned_vehicle_physics(self):
+        selected = self.vehicle_table.tree.selection()
+        if not selected:
+            messagebox.showinfo(
+                "Edit Physics",
+                "Select an existing vehicle in the table first.",
+                parent=self,
+            )
+            return
+        actor_id = int(self.vehicle_table.tree.item(selected[0])["values"][1])
+        request_id = self._new_request("edit_physics", {"actor_id": actor_id})
+        if not self.controller.carla.get_vehicle_edit_data(actor_id, request_id):
+            self.pending_requests.pop(request_id, None)
 
     def apply_vehicle_changes(self, data):
         blueprint_data = data["blueprint"]
         physics = data["physics"]
         self.database.blueprint_new_data = blueprint_data
-        print(blueprint_data)
-        self.controller.carla.apply_new_physics_and_blueprint_to_ghost(physics)
+        self.configured_blueprint_attributes = dict(blueprint_data or {})
+        self.configured_physics = physics
+        if self.is_ghost_preview_enabled() and self.database.ghost_data is not None:
+            self.controller.carla.apply_new_physics_and_blueprint_to_ghost(
+                physics
+            )
+        return True
 
-        is_changed = wait_and_try(
-            lambda: self.database.physics_applied == True
+    def _new_request(self, operation, data=None):
+        request_id = str(uuid.uuid4())
+        request = {"operation": operation}
+        request.update(data or {})
+        self.pending_requests[request_id] = request
+        return request_id
+
+    def _apply_existing_vehicle_physics(self, actor_id, data):
+        request_id = self._new_request("apply_physics", {"actor_id": actor_id})
+        if not self.controller.carla.apply_vehicle_physics(
+            actor_id,
+            data["physics"],
+            request_id,
+        ):
+            self.pending_requests.pop(request_id, None)
+            return False
+        return True
+
+    def _request_vehicle_replacement(self, actor_id, blueprint_id,
+                                     attributes, physics):
+        self.controller.close_movement_control_for_actor(
+            actor_id,
+            "Selected vehicle is being replaced",
+        )
+        request_id = self._new_request("replace", {"actor_id": actor_id})
+        accepted = self.controller.carla.change_actor_model(
+            blueprint_id,
+            actor_id,
+            attributes=attributes,
+            physics=physics,
+            request_id=request_id,
+        )
+        if not accepted:
+            self.pending_requests.pop(request_id, None)
+        return accepted
+
+    def check_actor_events(self):
+        try:
+            while True:
+                status, data = self.database.actor_event_queue.get_nowait()
+                if status == "ghost_configuration_applied":
+                    if data.get("success"):
+                        self.image_frame.update_image()
+                        self.database.physics_applied = False
+                    else:
+                        messagebox.showerror(
+                            "Vehicle configuration",
+                            data.get("error", "Could not configure preview vehicle."),
+                            parent=self,
+                        )
+                    continue
+
+                request_id = data.get("request_id") if isinstance(data, dict) else None
+                request = self.pending_requests.pop(request_id, None)
+                if request is None:
+                    continue
+
+                if status == "vehicle_edit_data":
+                    if not data.get("success"):
+                        messagebox.showerror(
+                            "Edit vehicle",
+                            data.get("error", "Could not read vehicle data."),
+                            parent=self,
+                        )
+                        continue
+                    if request["operation"] == "change_model_config":
+                        blueprint_id = request["blueprint_id"]
+                        callback = lambda edited: self._confirm_model_replacement(
+                            request["actor_id"], blueprint_id, edited
+                        )
+                        blueprint_data = None
+                        show_blueprint = True
+                        show_physics = False
+                    else:
+                        blueprint_id = data["blueprint_id"]
+                        callback = lambda edited: self._apply_existing_vehicle_physics(
+                            data["actor_id"],
+                            edited,
+                        )
+                        blueprint_data = None
+                        show_blueprint = False
+                        show_physics = True
+                    EntityEditWindow(
+                        self,
+                        blueprint_id,
+                        None,
+                        "vehicle",
+                        self.database.blueprint_lib,
+                        data["physics"],
+                        callback,
+                        blueprint_data,
+                        show_blueprint,
+                        show_physics,
+                    )
+                elif status == "vehicle_physics_applied":
+                    if data.get("success"):
+                        messagebox.showinfo(
+                            "Vehicle physics",
+                            "Physics was applied and verified against CARLA.",
+                            parent=self,
+                        )
+                    else:
+                        messagebox.showerror(
+                            "Vehicle physics",
+                            data.get("error", "CARLA rejected the physics settings."),
+                            parent=self,
+                        )
+                elif status == "actor_operation_result":
+                    self.database.spawned_actor_id = None
+                    self.controller.refresh_actor_tables()
+                    if data.get("success"):
+                        warnings = data.get("warnings") or []
+                        if warnings:
+                            messagebox.showwarning(
+                                "Vehicle replaced with warnings",
+                                "\n".join(warnings),
+                                parent=self,
+                            )
+                    else:
+                        messagebox.showerror(
+                            "Vehicle operation failed",
+                            data.get("error", "Unknown CARLA error."),
+                            parent=self,
+                        )
+        except queue.Empty:
+            pass
+        except Exception as error:
+            messagebox.showerror(
+                "Actors table update",
+                f"Could not process an actor operation result: {error}",
+                parent=self,
+            )
+        finally:
+            if self.winfo_exists():
+                self.actor_event_check = self.after(100, self.check_actor_events)
+
+    def _confirm_model_replacement(self, actor_id, blueprint_id, data):
+        confirmed = messagebox.askyesno(
+            "Replace vehicle model",
+            "Changing the model replaces the runtime actor. Movement control "
+            "and active sensor previews will be stopped; attached sensors will "
+            "be recreated. Continue?",
+            parent=self,
+        )
+        if not confirmed:
+            return False
+        return self._request_vehicle_replacement(
+            actor_id,
+            blueprint_id,
+            data["blueprint"],
+            data["physics"],
         )
 
-        if is_changed:
-            self.image_frame.update_image()
-            self.database.physics_applied = False
+    def destroy(self):
+        if self.actor_event_check is not None:
+            self.after_cancel(self.actor_event_check)
+            self.actor_event_check = None
+        super().destroy()
 
     def reset_tab(self):
         self.vehicle_name_var.set("Ghost Vehicle")
@@ -625,8 +847,8 @@ class VehicleTable(ttk.Frame):
         model = vehicle_info["type_id"]
         location = f"({vehicle_info['location']})",
         rotation = f"({vehicle_info['rotation']})",
-        sensors = ""    #TODO: Implement sensor information retrieval when the sensor management is implemented
-        status = vehicle_info["is_active"]
+        sensors = actor_sensor_status(self.database, vehicle_id)
+        status = vehicle_info.get("status", vehicle_info.get("is_active", "Unknown"))
         self.tree.insert("", "end", values=(name, vehicle_id, model, location, rotation, sensors, status))
 
     def remove_vehicle_from_table(self, vehicle_info):
@@ -644,8 +866,8 @@ class VehicleTable(ttk.Frame):
                 model = vehicle_info["type_id"]
                 location = f"({vehicle_info['location']})",
                 rotation = f"({vehicle_info['rotation']})",
-                sensors = ""    #TODO: Implement sensor information retrieval when the sensor management is implemented
-                status = vehicle_info["is_active"]
+                sensors = actor_sensor_status(self.database, vehicle_id)
+                status = vehicle_info.get("status", vehicle_info.get("is_active", "Unknown"))
                 self.tree.item(item, values=(name, vehicle_id, model, location, rotation, sensors, status))
                 break
 
@@ -669,7 +891,7 @@ class VehicleTable(ttk.Frame):
                         if transform is not None else "Unknown"
                     ),
                     "sensors": "",  # TODO: Implement sensor information retrieval when the sensor management is implemented
-                    "is_active": ("Active" if actor_info.is_alive else "Inactive")
+                    "status": actor_ownership_status(actor_info)
                 }
                 self.add_vehicle_to_table(vehicle_info)
 

@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 
@@ -14,6 +15,33 @@ class UnknownScenarioExtensionError(ScenarioPathError):
             f"Unknown scenario file extension '{self.path.suffix}'. "
             f"Use '{self.suggested_path.name}' for {file_format.upper()}."
         )
+
+
+WINDOWS_RESERVED_NAMES = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{number}" for number in range(1, 10)),
+    *(f"LPT{number}" for number in range(1, 10)),
+}
+
+
+def sanitize_scenario_filename(name, fallback="Scenario"):
+    """Return a Windows-safe filename stem without changing the scenario name."""
+    text = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", str(name or ""))
+    text = text.strip().rstrip(". ")
+    if not text:
+        text = str(fallback).strip() or "Scenario"
+    if text.upper() in WINDOWS_RESERVED_NAMES:
+        text += "_"
+    return text
+
+
+def scenario_path_for_name(path, name, file_format):
+    """Build an auto-synchronized path while preserving the selected folder."""
+    normalized_format = normalize_scenario_format(file_format)
+    extension = ".json" if normalized_format == "json" else ".yaml"
+    filename = sanitize_scenario_filename(name) + extension
+    current = str(path or "").strip()
+    return (Path(current).parent / filename) if current else Path(filename)
 
 
 def normalize_scenario_format(file_format):

@@ -1,4 +1,3 @@
-import math
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -6,6 +5,7 @@ from pathlib import Path
 from scenario_management.converters import (
     VEHICLE_PHYSICS_FIELDS,
     WHEEL_PHYSICS_FIELDS,
+    blueprint_value_to_string,
 )
 from scenario_management.models import (
     ActorCategory,
@@ -552,23 +552,10 @@ class ScenarioLoader:
 
     @staticmethod
     def _valid_attribute_value(attribute, value):
-        kind = str(getattr(attribute, "type", "string")).split(".")[-1].lower()
-        text = str(value).strip()
         try:
-            if kind in ("bool", "boolean"):
-                return text.lower() in ("true", "false")
-            if kind in ("int", "integer"):
-                int(text)
-                return True
-            if kind in ("float", "double"):
-                return math.isfinite(float(text))
-            if kind in ("rgbcolor", "rgb_color", "color"):
-                components = [int(part.strip()) for part in text.split(",")]
-                return len(components) == 3 and all(
-                    0 <= component <= 255 for component in components
-                )
+            blueprint_value_to_string(attribute, value)
             return True
-        except (TypeError, ValueError):
+        except (AttributeError, TypeError, ValueError):
             return False
 
     @staticmethod

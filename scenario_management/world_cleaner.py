@@ -1,3 +1,4 @@
+import time
 import uuid
 from dataclasses import asdict, dataclass, field
 
@@ -162,6 +163,9 @@ class WorldClearReport:
 
 
 class WorldCleaner:
+    DESTROY_CONFIRM_TIMEOUT = 1.0
+    DESTROY_CONFIRM_INTERVAL = 0.05
+
     CLEARABLE_CATEGORIES = {
         ActorCategory.VEHICLE,
         ActorCategory.PEDESTRIAN,
@@ -193,6 +197,12 @@ class WorldCleaner:
                 skipped.append({
                     "runtime_id": None,
                     "reason": "invalid_runtime_id",
+                })
+                continue
+            if not self._is_alive(actor):
+                skipped.append({
+                    "runtime_id": actor_id,
+                    "reason": "already_missing",
                 })
                 continue
             category = self.classifier.classify(actor, internal_actor_ids)
@@ -355,7 +365,10 @@ class WorldCleaner:
         current = {
             self.classifier.actor_id(actor): actor
             for actor in list(world.get_actors())
-            if self.classifier.actor_id(actor) is not None
+            if (
+                self.classifier.actor_id(actor) is not None
+                and self._is_alive(actor)
+            )
         }
         expected = {
             item.runtime_id: item.identity
@@ -392,9 +405,14 @@ class WorldCleaner:
 
     def execute_plan(self, world, plan, internal_actor_ids=None):
         current = self.validate_plan(world, plan, internal_actor_ids)
-        initial_ids = set(current)
+        initial_ids = {
+            actor_id
+            for actor_id, actor in current.items()
+            if self._is_alive(actor)
+        }
         planned_ids = {item.runtime_id for item in plan.items}
         preliminary_errors = {}
+        destroy_requested = set()
 
         for item in self._destruction_order(plan.items):
             actor = current.get(item.runtime_id)
@@ -402,17 +420,20 @@ class WorldCleaner:
                 continue
             try:
                 self._stop_before_destroy(actor, item.category)
-                actor.destroy()
+                destroy_result = actor.destroy()
+                destroy_requested.add(item.runtime_id)
+                if destroy_result is False:
+                    preliminary_errors[item.runtime_id] = (
+                        "CARLA actor.destroy() returned False."
+                    )
             except Exception as error:
                 preliminary_errors[item.runtime_id] = str(error)
 
         try:
-            final_actors = list(world.get_actors())
-            final_ids = {
-                self.classifier.actor_id(actor)
-                for actor in final_actors
-                if self.classifier.actor_id(actor) is not None
-            }
+            final_ids = self._wait_for_destroyed_ids(
+                world,
+                destroy_requested,
+            )
         except Exception as error:
             return WorldClearReport(
                 mode=plan.mode,
@@ -478,6 +499,24 @@ class WorldCleaner:
         else:
             report.status = "failed"
         return report
+
+    def _wait_for_destroyed_ids(self, world, requested_ids):
+        deadline = time.monotonic() + self.DESTROY_CONFIRM_TIMEOUT
+        while True:
+            final_ids = {
+                self.classifier.actor_id(actor)
+                for actor in list(world.get_actors())
+                if (
+                    self.classifier.actor_id(actor) is not None
+                    and self._is_alive(actor)
+                )
+            }
+            if not (set(requested_ids) & final_ids):
+                return final_ids
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return final_ids
+            time.sleep(min(self.DESTROY_CONFIRM_INTERVAL, remaining))
 
     @staticmethod
     def _record_removed_category(report, item):

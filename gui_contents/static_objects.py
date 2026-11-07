@@ -7,7 +7,13 @@ from gui_contents.ActorEditView import EntityEditWindow
 from gui_contents.change_model_top import ChangeModelTop
 from gui_contents.set_transform_top import ChangeTransformTop
 from gui_contents.spawn_preview import ActorPreviewFrame, GhostPreview
-from utilities.functions import filter_carla_id_by_type, return_data_from_transform, wait_and_try
+from utilities.functions import (
+    actor_ownership_status,
+    actor_sensor_status,
+    filter_carla_id_by_type,
+    return_data_from_transform,
+    wait_and_try,
+)
 
 
 class CustomStaticObjectFrame(tk.Frame):
@@ -29,11 +35,16 @@ class CustomStaticObjectFrame(tk.Frame):
         self._static_object_frame_setup()
 
     def spawn_ghost(self, blueprint_id=None, transform=None):
+        if not self.ghost_preview_enabled.get():
+            return False
         if not self.actor_model:
             return
         if blueprint_id is None:
             blueprint_id = self.actor_model[self.choose_model.get()]
-        self.actor_preview.spawn(blueprint_id=blueprint_id, transform=transform)
+        return self.actor_preview.spawn(
+            blueprint_id=blueprint_id,
+            transform=transform or self._current_transform(),
+        )
 
     def _static_object_variables_definition(self):
         self.actor_name_var = tk.StringVar(value="Ghost Static Object")
@@ -47,6 +58,7 @@ class CustomStaticObjectFrame(tk.Frame):
         self.selected_spawn_point = tk.StringVar()
         self.choose_model = tk.StringVar()
         self.actor_model = {}
+        self.ghost_preview_enabled = tk.BooleanVar(value=True)
 
     def _static_object_frame_setup(self):
         upper_frame = ttk.LabelFrame(
@@ -119,6 +131,13 @@ class CustomStaticObjectFrame(tk.Frame):
         self.combobox_spawn_points.bind("<<ComboboxSelected>>", self._update_location_from_spawn_point)
         self.combobox_spawn_points.grid(row=6, column=0, sticky="ew")
 
+        ttk.Checkbutton(
+            heading_frame,
+            text="Enable Ghost Preview",
+            variable=self.ghost_preview_enabled,
+            command=self._toggle_ghost_preview,
+        ).grid(row=7, column=0, sticky="w", pady=(10, 0))
+
         self._create_transform_controls(location_frame)
 
         self.actor_table = StaticObjectTable(lower_frame, self.controller)
@@ -126,7 +145,7 @@ class CustomStaticObjectFrame(tk.Frame):
 
         button_control_frame = ttk.Frame(lower_frame, style="new.TFrame")
         button_control_frame.grid(row=1, column=0, sticky="ew", padx=20, pady=(0, 12))
-        for column in range(4):
+        for column in range(3):
             button_control_frame.grid_columnconfigure(column, weight=1)
 
         ttk.Button(button_frame, text="Spawn Static Object", command=self.spawn_actor, width=20).grid(
@@ -143,9 +162,6 @@ class CustomStaticObjectFrame(tk.Frame):
         )
         ttk.Button(button_control_frame, text="Update Location", command=self.update_location, width=18).grid(
             row=0, column=2, sticky="ew", padx=(0, 10), pady=(0, 8)
-        )
-        ttk.Button(button_control_frame, text="Copy Static Object", command=self.copy_actor, width=20).grid(
-            row=0, column=3, sticky="ew", padx=(0, 10), pady=(0, 8)
         )
 
     def _create_transform_controls(self, parent):
@@ -220,9 +236,6 @@ class CustomStaticObjectFrame(tk.Frame):
         values[4] = f"({transform.rotation.pitch:.2f}, {transform.rotation.yaw:.2f}, {transform.rotation.roll:.2f})"
         self.actor_table.tree.item(selected_actor, values=values)
 
-    def copy_actor(self, event=None):
-        pass
-
     def change_model(self, event=None):
         if self.actor_table.tree.selection():
             ChangeModelTop(self, "static", self.database.blueprint_lib, self.change_spawned_actor_model)
@@ -267,6 +280,17 @@ class CustomStaticObjectFrame(tk.Frame):
         if self.available_spawn_points:
             self.combobox_spawn_points.current(0)
 
+    def _toggle_ghost_preview(self):
+        enabled = bool(self.ghost_preview_enabled.get())
+        self.actor_preview.set_enabled(enabled)
+        if enabled:
+            self.spawn_ghost()
+        else:
+            self.destroy_ghost()
+
+    def is_ghost_preview_enabled(self):
+        return bool(self.ghost_preview_enabled.get())
+
     def destroy_ghost(self):
         self.actor_preview.destroy()
         self.image_frame.update_image()
@@ -275,9 +299,12 @@ class CustomStaticObjectFrame(tk.Frame):
         selected_model = self.actor_model.get(self.choose_model.get())
         if selected_model is None:
             return
-        transform = self.actor_preview.get_transform() or self._current_transform()
-        self.destroy_ghost()
-        self.spawn_ghost(blueprint_id=selected_model, transform=transform)
+        if self.is_ghost_preview_enabled():
+            transform = (
+                self.actor_preview.get_transform() or self._current_transform()
+            )
+            self.destroy_ghost()
+            self.spawn_ghost(blueprint_id=selected_model, transform=transform)
 
     def get_actor_info(self):
         transform = self._current_transform()
@@ -292,7 +319,7 @@ class CustomStaticObjectFrame(tk.Frame):
                 f"{transform.rotation.pitch:.2f}, {transform.rotation.yaw:.2f}, {transform.rotation.roll:.2f}"
             ),
             "sensors": "",
-            "is_active": "Pending",
+            "status": "Managed",
         }
 
     def spawn_actor(self):
@@ -311,7 +338,7 @@ class CustomStaticObjectFrame(tk.Frame):
         self.controller.carla.spawn_actor(data)
         if wait_and_try(lambda: self.database.spawned_actor_id is not None):
             actor_data["carla_id"] = self.database.spawned_actor_id
-            actor_data["is_active"] = "Active"
+            actor_data["status"] = "Managed"
             self.actor_table.add_actor_to_table(actor_data)
             self.database.spawned_actor_id = None
             self.reset_tab()
@@ -323,8 +350,8 @@ class CustomStaticObjectFrame(tk.Frame):
         selected_actor = self.actor_table.tree.selection()
         if selected_actor:
             actor_id = self.actor_table.tree.item(selected_actor)["values"][1]
-            self.controller.carla.remove_actor(actor_id)
-            self.actor_table.tree.delete(selected_actor)
+            if self.controller.carla.remove_actor(actor_id):
+                self.actor_table.tree.delete(selected_actor)
 
     def edit_actor(self):
         selected_model = self.actor_model.get(self.choose_model.get())
@@ -343,10 +370,15 @@ class CustomStaticObjectFrame(tk.Frame):
 
     def apply_actor_changes(self, data):
         self.database.blueprint_new_data = data["blueprint"]
-        self.controller.carla.apply_new_physics_and_blueprint_to_ghost(data["physics"])
+        if not self.is_ghost_preview_enabled():
+            return True
+        self.controller.carla.apply_new_physics_and_blueprint_to_ghost(
+            data["physics"]
+        )
         if wait_and_try(lambda: self.database.physics_applied is True):
             self.image_frame.update_image()
             self.database.physics_applied = False
+        return True
 
     def reset_tab(self):
         self.actor_name_var.set("Ghost Static Object")
@@ -444,8 +476,8 @@ class StaticObjectTable(ttk.Frame):
                 actor_info["type_id"],
                 f"({actor_info['location']})",
                 f"({actor_info['rotation']})",
-                actor_info.get("sensors", ""),
-                actor_info["is_active"],
+                actor_sensor_status(self.database, actor_info["carla_id"]),
+                actor_info.get("status", actor_info.get("is_active", "Unknown")),
             ),
         )
 
@@ -468,8 +500,8 @@ class StaticObjectTable(ttk.Frame):
                         actor_info["type_id"],
                         f"({actor_info['location']})",
                         f"({actor_info['rotation']})",
-                        actor_info.get("sensors", ""),
-                        actor_info["is_active"],
+                        actor_sensor_status(self.database, actor_id),
+                        actor_info.get("status", actor_info.get("is_active", "Unknown")),
                     ),
                 )
                 break
@@ -495,7 +527,7 @@ class StaticObjectTable(ttk.Frame):
                             if transform is not None else "Unknown"
                         ),
                         "sensors": "",
-                        "is_active": "Active" if actor_info.is_alive else "Inactive",
+                        "status": actor_ownership_status(actor_info),
                     }
                 )
 

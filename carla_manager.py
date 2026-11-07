@@ -5,7 +5,7 @@ import copy
 import carla
 import tkinter as tk
 
-import messagebox
+from tkinter import messagebox
 
 import actors.actors as actors
 from datastore.datastore import DataStorage
@@ -66,6 +66,7 @@ class Manager(tk.Tk):
         self.spectator_check_job = None
         self.simulation_check_job = None
         self.movement_control = MovementControlSessionManager(self)
+        self.pending_movement_control_actor_id = None
 
         self.main_view = None
         self.create_main_window()
@@ -218,6 +219,7 @@ class Manager(tk.Tk):
         self.disconnecting = True
         self.connected = False
         self.world_changing = False
+        self.pending_movement_control_actor_id = None
         self.main_view.tabControl.unbind("<<NotebookTabChanged>>")
         self.main_view.actors_tab_control.unbind("<<NotebookTabChanged>>")
         self.main_view.tabControl.select(self.main_view.main_tab)
@@ -312,12 +314,17 @@ class Manager(tk.Tk):
         )
         if not confirmed:
             return
-        if self.carla.take_actor_ownership(runtime_id):
-            dashboard = self.main_view.main_view.dashboard_frame
-            dashboard.set_adoption_pending(True)
-            dashboard.adoption_status_var.set(
-                "Taking ownership..."
-            )
+        self._request_actor_ownership(runtime_id)
+
+    def _request_actor_ownership(self, runtime_id, movement_control=False):
+        if not self.carla.take_actor_ownership(runtime_id):
+            return False
+        if movement_control:
+            self.pending_movement_control_actor_id = int(runtime_id)
+        dashboard = self.main_view.main_view.dashboard_frame
+        dashboard.set_adoption_pending(True)
+        dashboard.adoption_status_var.set("Taking ownership...")
+        return True
 
     def save_scenario(self, name, path, file_format):
         if not self._simulation_control_available():
@@ -506,6 +513,32 @@ class Manager(tk.Tk):
             "Map changed: "
             f"{'yes' if report.get('map_changed') else 'no'}",
         ]
+        clear_report = report.get("clear_report") or {}
+        if clear_report:
+            lines.extend([
+                "",
+                "Clear before Load:",
+                f"- Planned: {clear_report.get('planned_count', 0)}",
+                f"- Confirmed removed: {clear_report.get('removed', 0)}",
+                f"- Already missing: "
+                f"{clear_report.get('already_missing', 0)}",
+                f"- Failed: {clear_report.get('failed', 0)}",
+            ])
+            if clear_report.get("remaining_after_clear"):
+                lines.append(
+                    "- Still qualifying after Clear: "
+                    f"{clear_report['remaining_after_clear']}"
+                )
+            for error in clear_report.get("errors") or []:
+                runtime_id = error.get("runtime_id")
+                target = (
+                    f"actor {runtime_id}"
+                    if runtime_id is not None else "world inventory"
+                )
+                lines.append(
+                    f"- Failed {target}: "
+                    f"{error.get('message', 'Unknown error')}"
+                )
         warnings = report.get("warnings") or []
         if warnings:
             lines.extend(["", "Warnings:"])
@@ -514,8 +547,18 @@ class Manager(tk.Tk):
         if errors:
             lines.extend(["", "Errors:"])
             for error in errors:
-                actor = error.get("scenario_id")
-                suffix = f" [{actor}]" if actor else ""
+                actor_details = [
+                    value for value in (
+                        error.get("user_name"),
+                        error.get("blueprint_id"),
+                        error.get("scenario_id"),
+                    )
+                    if value
+                ]
+                suffix = (
+                    f" [{' | '.join(actor_details)}]"
+                    if actor_details else ""
+                )
                 lines.append(
                     f"- {error.get('stage', 'unknown')}{suffix}: "
                     f"{error.get('message', 'Unknown error')}"
@@ -703,6 +746,15 @@ class Manager(tk.Tk):
                         )
                 elif status == "actor_ownership_result":
                     if self.connected and not self.disconnecting and not self.closing:
+                        runtime_id = data.get("runtime_id")
+                        continue_with_movement = (
+                            self.pending_movement_control_actor_id is not None
+                            and runtime_id is not None
+                            and int(runtime_id)
+                            == self.pending_movement_control_actor_id
+                        )
+                        if continue_with_movement:
+                            self.pending_movement_control_actor_id = None
                         self._refresh_actor_tables()
                         self._refresh_dashboard()
                         dashboard = self.main_view.main_view.dashboard_frame
@@ -720,6 +772,8 @@ class Manager(tk.Tk):
                             messagebox.showinfo("Take Ownership", details)
                         else:
                             messagebox.showwarning("Take Ownership", details)
+                        if continue_with_movement and data.get("success"):
+                            self.open_movement_control(runtime_id)
                 elif status == "scenario_operation_blocked":
                     if not self.closing:
                         messagebox.showinfo(
@@ -995,14 +1049,27 @@ class Manager(tk.Tk):
                 "The selected actor is no longer available.",
             )
             return
-        if (
-            actor_info is not None
-            and actor_info.ownership != ActorOwnership.MANAGED
-        ):
+        if actor_info is not None and actor_info.ownership == ActorOwnership.EXTERNAL:
+            confirmed = messagebox.askyesno(
+                "Movement Control",
+                "The selected actor is External and must be adopted before "
+                "Movement Control can be used.\n\n"
+                f"Runtime ID: {actor_id}\n"
+                f"Type: {actor.type_id}\n\n"
+                "Take ownership now?",
+                parent=self,
+            )
+            if confirmed:
+                self._request_actor_ownership(
+                    actor_id,
+                    movement_control=True,
+                )
+            return
+        if actor_info is not None and actor_info.ownership != ActorOwnership.MANAGED:
             messagebox.showinfo(
                 "Movement Control",
-                "External actors are read-only until ownership takeover is "
-                "implemented.",
+                "This actor is not GUI-managed and cannot use Movement Control.",
+                parent=self,
             )
             return
         if not actor.type_id.startswith(("vehicle.", "walker.")):
@@ -1219,6 +1286,10 @@ class MainView(tk.Frame):
 
     def close_movement_control_for_actor(self, actor_id, reason):
         self.manager.close_movement_control_for_actor(actor_id, reason)
+
+    def refresh_actor_tables(self):
+        """Refresh all Actors views through the owning Manager."""
+        self.manager._refresh_actor_tables()
 
     def _control_tab_setup(self):
         self.tabControl.add(self.main_tab, text="Main View")

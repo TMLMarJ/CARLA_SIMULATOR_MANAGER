@@ -1,3 +1,4 @@
+from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, ttk
 
@@ -14,6 +15,8 @@ from gui_contents.simulation_dashboard_view import SimulationDashboardFrame
 from scenario_management.path_utils import (
     UnknownScenarioExtensionError,
     normalize_scenario_path,
+    scenario_path_for_name,
+    sanitize_scenario_filename,
 )
 
 
@@ -260,6 +263,11 @@ class ScenarioSaveFrame(ttk.LabelFrame):
         self.status_var = tk.StringVar(
             value="Connect to CARLA to manage scenarios."
         )
+        self._updating_path = False
+        self._path_filename_manual = False
+        self._overwrite_confirmed_path = None
+        self.name_var.trace_add("write", self._on_name_changed)
+        self.path_var.trace_add("write", self._on_path_changed)
         self._create_widgets()
 
     def _create_widgets(self):
@@ -394,11 +402,57 @@ class ScenarioSaveFrame(ttk.LabelFrame):
             parent=self,
             title="Save CARLA scenario",
             defaultextension=extension,
-            initialfile=f"{self.name_var.get().strip() or 'Scenario'}{extension}",
+            initialfile=(
+                f"{sanitize_scenario_filename(self.name_var.get())}"
+                f"{extension}"
+            ),
             filetypes=filetypes,
         )
         if path:
-            self._set_normalized_path(path, confirm_unknown=True)
+            if self._set_normalized_path(path, confirm_unknown=True):
+                self._path_filename_manual = (
+                    Path(self.path_var.get()).stem.casefold()
+                    != sanitize_scenario_filename(
+                        self.name_var.get()
+                    ).casefold()
+                )
+                selected = Path(self.path_var.get())
+                self._overwrite_confirmed_path = (
+                    self._path_key(selected) if selected.exists() else None
+                )
+
+    def _on_name_changed(self, *_args):
+        if self._path_filename_manual:
+            return
+        target = scenario_path_for_name(
+            self.path_var.get(),
+            self.name_var.get(),
+            self.format_var.get(),
+        )
+        self._set_path_value(target, manual_filename=False)
+
+    def _on_path_changed(self, *_args):
+        if self._updating_path:
+            return
+        self._overwrite_confirmed_path = None
+        path = self.path_var.get().strip()
+        if not path:
+            self._path_filename_manual = False
+            return
+        expected = sanitize_scenario_filename(self.name_var.get())
+        self._path_filename_manual = (
+            Path(path).stem.casefold() != expected.casefold()
+        )
+
+    def _set_path_value(self, path, manual_filename=None):
+        self._overwrite_confirmed_path = None
+        self._updating_path = True
+        try:
+            self.path_var.set(str(path))
+        finally:
+            self._updating_path = False
+        if manual_filename is not None:
+            self._path_filename_manual = bool(manual_filename)
 
     def _on_format_changed(self, event=None):
         path = self.path_var.get().strip()
@@ -426,7 +480,8 @@ class ScenarioSaveFrame(ttk.LabelFrame):
                 file_format,
                 allow_unknown=True,
             )
-        self.path_var.set(str(target))
+        manual_filename = getattr(self, "_path_filename_manual", False)
+        self._set_path_value(target, manual_filename=manual_filename)
         return True
 
     def save(self):
@@ -446,11 +501,29 @@ class ScenarioSaveFrame(ttk.LabelFrame):
                 return
         if not self._set_normalized_path(path, confirm_unknown=True):
             return
+        target = Path(self.path_var.get())
+        target_key = self._path_key(target)
+        if (
+            target.exists()
+            and target_key != self._overwrite_confirmed_path
+            and not messagebox.askyesno(
+                "Overwrite Scenario",
+                f"The scenario file already exists:\n{target}\n\n"
+                "Overwrite it?",
+            )
+        ):
+            return
+        if target.exists():
+            self._overwrite_confirmed_path = target_key
         self.manager.save_scenario(
             name,
             self.path_var.get(),
             file_format,
         )
+
+    @staticmethod
+    def _path_key(path):
+        return str(Path(path).absolute()).casefold()
 
     def clear_world(self):
         self.manager.prepare_clear_world(self.clear_mode_var.get())
@@ -536,7 +609,10 @@ class ScenarioSaveFrame(ttk.LabelFrame):
     def show_result(self, report):
         self.pending = False
         if report.get("path"):
-            self.path_var.set(report["path"])
+            self._set_path_value(
+                report["path"],
+                manual_filename=self._path_filename_manual,
+            )
         skipped = sum(
             report.get(field, 0)
             for field in (
