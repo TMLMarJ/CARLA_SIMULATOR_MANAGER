@@ -2,7 +2,7 @@ from typing import Dict
 import time
 
 import carla
-from scenario_management.models import ActorOwnership
+from models.scenarios import ActorOwnership
 
 
 def actor_ownership_status(actor_info):
