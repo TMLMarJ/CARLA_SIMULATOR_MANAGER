@@ -9,6 +9,7 @@ from unittest.mock import patch
 from core.carla_pythonapi import (
     CARLA_PYTHONAPI_ENV,
     CARLA_ROOT_ENV,
+    load_basic_agent,
     load_global_route_planner,
 )
 
@@ -83,6 +84,40 @@ class CarlaPythonApiTests(unittest.TestCase):
         self.assertIn(CARLA_PYTHONAPI_ENV, error)
         self.assertIn("PythonAPI/carla", error)
 
+    def test_imports_basic_agent_from_configured_pythonapi(self):
+        with tempfile.TemporaryDirectory() as temp_directory:
+            carla_root = Path(temp_directory)
+            package = (
+                carla_root
+                / "PythonAPI"
+                / "carla"
+                / "agents"
+                / "navigation"
+            )
+            package.mkdir(parents=True)
+            (package.parent / "__init__.py").write_text("", encoding="utf-8")
+            (package / "__init__.py").write_text("", encoding="utf-8")
+            (package / "global_route_planner.py").write_text(
+                "class GlobalRoutePlanner:\n    pass\n",
+                encoding="utf-8",
+            )
+            (package / "basic_agent.py").write_text(
+                "class BasicAgent:\n    configured = True\n",
+                encoding="utf-8",
+            )
+            os.environ[CARLA_PYTHONAPI_ENV] = str(carla_root)
+            os.environ.pop(CARLA_ROOT_ENV, None)
+            self._remove_loaded_agents()
+
+            basic_agent, error = load_basic_agent()
+
+            self.assertIsNone(error)
+            self.assertTrue(basic_agent.configured)
+            self.assertIn(
+                str(carla_root / "PythonAPI" / "carla"),
+                sys.path,
+            )
+
     def test_invalid_configuration_is_not_silently_ignored(self):
         with tempfile.TemporaryDirectory() as temp_directory:
             os.environ[CARLA_PYTHONAPI_ENV] = temp_directory
@@ -116,6 +151,31 @@ class CarlaPythonApiTests(unittest.TestCase):
             planner, error = load_global_route_planner()
 
         self.assertIsNone(planner)
+        self.assertIn("already loaded outside", error)
+
+    def test_configured_path_rejects_foreign_basic_agent_module(self):
+        with tempfile.TemporaryDirectory() as temp_directory:
+            root = Path(temp_directory)
+            package = root / "PythonAPI" / "carla" / "agents" / "navigation"
+            package.mkdir(parents=True)
+            (package / "global_route_planner.py").write_text(
+                "class GlobalRoutePlanner:\n    pass\n",
+                encoding="utf-8",
+            )
+            (package / "basic_agent.py").write_text(
+                "class BasicAgent:\n    pass\n",
+                encoding="utf-8",
+            )
+            os.environ[CARLA_PYTHONAPI_ENV] = str(root)
+            os.environ.pop(CARLA_ROOT_ENV, None)
+            foreign_module = types.ModuleType("agents.navigation.basic_agent")
+            foreign_module.__file__ = str(root / "foreign" / "basic_agent.py")
+            foreign_module.BasicAgent = object
+            sys.modules["agents.navigation.basic_agent"] = foreign_module
+
+            basic_agent, error = load_basic_agent()
+
+        self.assertIsNone(basic_agent)
         self.assertIn("already loaded outside", error)
 
 

@@ -2,7 +2,7 @@
 
 ## Zakres dokumentu
 
-Dokument opisuje stan kodu źródłowego z 7 listopada 2026 r. Jego źródłem jest implementacja, a nie wcześniejsze raporty. Szczegóły modułów, komunikacji i danych znajdują się odpowiednio w [MODULES.md](MODULES.md), [CARLA_COMMUNICATION.md](CARLA_COMMUNICATION.md), [DATA_FLOW.md](DATA_FLOW.md) i [FEATURES.md](FEATURES.md).
+Dokument opisuje stan kodu źródłowego przed końcowymi testami E2E w listopadzie 2026 r. Jego źródłem jest implementacja, a nie wcześniejsze raporty. Szczegóły modułów, komunikacji i danych znajdują się odpowiednio w [MODULES.md](MODULES.md), [CARLA_COMMUNICATION.md](CARLA_COMMUNICATION.md), [DATA_FLOW.md](DATA_FLOW.md) i [FEATURES.md](FEATURES.md).
 
 ## Cel aplikacji
 
@@ -14,6 +14,12 @@ CARLA Simulator Manager jest desktopową aplikacją administracyjną dla symulat
 - sterowania ruchem aktorów oraz podglądu kamer;
 - monitorowania aktorów, sensorów i stanu aplikacji;
 - zapisywania i odtwarzania scenariuszy JSON/YAML.
+
+Vehicle Destination domyślnie wykonuje oficjalny `BasicAgent` z CARLA 0.9.16.
+Plan powstaje w `GlobalRoutePlanner`, jest zachowywany wyłącznie po stronie
+workera, a cykl `run_step()`/`apply_control()` nie jest wykonywany w Tkinterze
+ani w procesie Pygame. Executory Traffic Managera `path` i `route` pozostają
+opcjonalnymi wariantami diagnostycznymi.
 
 Jedynym punktem wejścia jest `app.py`. Jego blok `if __name__ == "__main__"` wywołuje `multiprocessing.freeze_support()`, tworzy `gui.application.Manager` i uruchamia pętlę Tkinter przez `mainloop()`. `gui.main_view.MainView` jest głównym widokiem. Historyczny wrapper `carla_manager.py` został usunięty w etapie 4B.10.
 
@@ -110,6 +116,8 @@ Callbacki sensorów CARLA nie modyfikują widgetów. Zapisują dane do buforów 
 - Aktorzy mają rozróżnienie `managed`/`external`; operacje mutujące zwykle wymagają aktora zarządzanego.
 - Runtime ID aktora nie jest tożsamością trwałą scenariusza; zapis używa `scenario_id`.
 - Zmiana świata unieważnia referencje runtime, stan ruchu, podglądy i plany preflight.
+- Zamknięcie okna Movement Control nie anuluje aktywnego Destination; runtime
+  kończy jawna zmiana trybu, wynik terminalny albo lifecycle aktora/świata.
 - Tkinter powinien być aktualizowany wyłącznie z głównego wątku przez polling kolejek.
 - Podglądy Pygame są izolowane procesami uruchamianymi metodą `spawn`.
 - Scenariusz jest walidowany przed zapisem i przed wykonaniem odczytu; zapis jest atomowy.

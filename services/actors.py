@@ -196,23 +196,36 @@ class ActorService:
             self.database.vehicle_control_states.pop(actor_id, None)
             self.database.walker_ai_states.pop(actor_id, None)
 
-    def cleanup_preview(self):
+    def cleanup_preview(self, strict=False):
         if self.database.ghost_camera is not None:
             try:
                 self.database.ghost_camera.stop()
                 self.database.ghost_camera.destroy()
             except Exception as error:
+                if strict:
+                    raise RuntimeError(
+                        "Could not destroy the ghost preview camera."
+                    ) from error
                 print(f"Error destroying ghost camera: {error}")
             finally:
-                self.database.ghost_camera = None
+                if not strict:
+                    self.database.ghost_camera = None
+            self.database.ghost_camera = None
 
         if self.database.ghost_data is not None:
             try:
                 self.database.ghost_data.destroy()
             except Exception as error:
+                if strict:
+                    raise RuntimeError(
+                        "Could not destroy the ghost preview actor."
+                    ) from error
                 print(f"Error destroying ghost: {error}")
             finally:
-                self.database.ghost_data = None
+                if not strict:
+                    self.database.ghost_data = None
+            self.database.ghost_data = None
 
         self.database.ghost_physic = None
         self.database.ghost_spawned = False
+        return True

@@ -373,7 +373,10 @@ class CustomWorldAndWeatherFrame(tk.Frame):
             self._finish_world_change()
             return
 
-        if manager.spectator_preview.is_active():
+        if (
+            manager.spectator_preview.is_active()
+            or manager.movement_control.is_preview_process_active()
+        ):
             self.world_change_check = self.after(
                 100,
                 self._wait_for_spectator_close

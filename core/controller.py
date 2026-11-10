@@ -43,6 +43,7 @@ from services.world import WorldService
 class CarlaController(MovementRuntime, SimulationRuntime, ScenarioRuntime):
     TICK_TIMEOUT_SECONDS = 5.0
     TRAFFIC_MANAGER_PORT = 8000
+    APPLICATION_TRAFFIC_MANAGER_PORT = 8050
     MANUAL_CONTROL_HZ = 20.0
     MANUAL_INPUT_TIMEOUT_SECONDS = 0.5
     VEHICLE_NAVIGATION_CHECK_INTERVAL_SECONDS = 0.5
@@ -276,19 +277,20 @@ class CarlaController(MovementRuntime, SimulationRuntime, ScenarioRuntime):
             world=context.world,
             map_name=map_name,
         )
-        self._shutdown_vehicle_controls(
-            disable_autopilot=True,
-            clear_paths=False,
-        )
-        self._shutdown_walker_ai()
-        self.cleanup_movement_preview("world_changed")
-        self.cleanup_sensor_previews()
-        self.cleanup_preview()
         try:
-            self._shutdown_exclusive_traffic_manager(
+            self._shutdown_vehicle_controls(
+                disable_autopilot=True,
+                clear_paths=False,
+                strict=True,
+            )
+            self._shutdown_walker_ai(strict=True)
+            self.cleanup_movement_preview(
                 "world_changed",
                 strict=True,
             )
+            self.cleanup_sensor_previews(strict=True)
+            self.cleanup_preview(strict=True)
+            self._prepare_traffic_manager_for_world_change()
         except Exception as error:
             self.dashboard_monitor.record_error(error)
             self.database.world_change_error = str(error)
@@ -298,7 +300,7 @@ class CarlaController(MovementRuntime, SimulationRuntime, ScenarioRuntime):
             return
         self._invalidate_traffic_manager_reference()
         self.sensor_status_errors.clear()
-        self._invalidate_database_world_reference()
+        self._invalidate_database_episode_references()
         self.simulation_manager.stop_local_ticks()
         self._publish_simulation_control_state(force=True)
         self.dashboard_monitor.invalidate(
@@ -315,6 +317,8 @@ class CarlaController(MovementRuntime, SimulationRuntime, ScenarioRuntime):
             world=context.world,
             map_name=map_name,
         )
+        context.world = None
+        context.blueprint_library = None
 
         try:
             self._tm_debug_event(
@@ -555,7 +559,14 @@ class CarlaController(MovementRuntime, SimulationRuntime, ScenarioRuntime):
             queue_timeout = (
                 0.0
                 if self.simulation_manager.should_tick()
-                else (0.05 if self._manual_control_is_active() else 0.1)
+                else (
+                    0.05
+                    if (
+                        self._manual_control_is_active()
+                        or self._basic_agent_control_is_active()
+                    )
+                    else 0.1
+                )
             )
             cmd, data = self._get_next_command(queue_timeout)
 
@@ -1578,11 +1589,22 @@ class CarlaController(MovementRuntime, SimulationRuntime, ScenarioRuntime):
 
             if not self.world_transition_event.is_set():
                 self._service_manual_vehicle_control()
+                if not self.simulation_manager.synchronous_mode:
+                    self._service_basic_agent_control(world)
 
             world_snapshot = None
             if self.running and cmd != "stop_simulation_control":
                 world_snapshot = self._service_simulation(world)
             if self.running and not self.world_transition_event.is_set():
+                if (
+                    self.simulation_manager.synchronous_mode
+                    and world_snapshot is not None
+                ):
+                    self._service_basic_agent_control(
+                        world,
+                        frame=getattr(world_snapshot, "frame", None),
+                        force=True,
+                    )
                 self._service_vehicle_navigation(world, world_snapshot)
                 self._service_walker_ai(world, world_snapshot)
             if self.running:
@@ -1684,6 +1706,42 @@ class CarlaController(MovementRuntime, SimulationRuntime, ScenarioRuntime):
             self.database.world_generation = (
                 int(getattr(self.database, "world_generation", 0)) + 1
             )
+
+    def _invalidate_database_episode_references(self):
+        """Detach every Python proxy owned by the outgoing CARLA episode."""
+        self._invalidate_database_world_reference()
+        with self.database.lock:
+            actors_db = getattr(self.database, "actors_db", None)
+            if actors_db is not None:
+                clear = getattr(actors_db, "clear", None)
+                if callable(clear):
+                    clear()
+                else:
+                    getattr(actors_db, "actors", {}).clear()
+                    getattr(actors_db, "actors_db", {}).clear()
+            sensors_db = getattr(self.database, "sensors_db", None)
+            if sensors_db is not None:
+                clear = getattr(sensors_db, "clear", None)
+                if callable(clear):
+                    clear()
+                else:
+                    getattr(sensors_db, "sensors", {}).clear()
+                    getattr(sensors_db, "sensors_db", {}).clear()
+            getattr(self.database, "vehicle_control_states", {}).clear()
+            getattr(self.database, "walker_ai_states", {}).clear()
+            if hasattr(self.database, "spawned_actor_id"):
+                self.database.spawned_actor_id = None
+            if hasattr(self.database, "ghost_camera"):
+                self.database.ghost_camera = None
+            if hasattr(self.database, "ghost_data"):
+                self.database.ghost_data = None
+            if hasattr(self.database, "ghost_physic"):
+                self.database.ghost_physic = None
+            if hasattr(self.database, "ghost_spawned"):
+                self.database.ghost_spawned = False
+        sensor_queue = getattr(self.database, "sensor_event_queue", None)
+        if sensor_queue is not None:
+            sensor_queue.put(("sensors_cleared", None))
 
     def _recover_world_after_failed_change(self, previous_world_id):
         current_world = self.client.get_world()
@@ -1832,11 +1890,11 @@ class CarlaController(MovementRuntime, SimulationRuntime, ScenarioRuntime):
             return
         self.command_queue.put(("shutdown", None))
 
-    def cleanup_preview(self):
+    def cleanup_preview(self, strict=False):
         actor_service = getattr(self, "actor_service", None)
         if actor_service is None:
             actor_service = ActorService(self.database)
-        actor_service.cleanup_preview()
+        return actor_service.cleanup_preview(strict=strict)
 
     def _ghost_preview_request_is_current(self, request_id, enabled):
         transition = getattr(self, "world_transition_event", None)
@@ -1856,9 +1914,8 @@ class CarlaController(MovementRuntime, SimulationRuntime, ScenarioRuntime):
     def stop_sensor_preview_actor(self, sensor_id):
         self._get_sensor_service().stop_preview_actor(sensor_id)
 
-    def cleanup_sensor_previews(self):
-        for sensor_id in list(self.sensor_preview_ids):
-            self.stop_sensor_preview_actor(sensor_id)
+    def cleanup_sensor_previews(self, strict=False):
+        return self._get_sensor_service().cleanup_previews(strict=strict)
 
     def _get_sensor_service(self):
         sensor_service = getattr(self, "sensor_service", None)
@@ -1965,7 +2022,7 @@ class CarlaController(MovementRuntime, SimulationRuntime, ScenarioRuntime):
                 "GlobalRoutePlanner ended on a different driving lane than "
                 "the selected Destination waypoint."
             )
-        return path, target_waypoint, route_waypoints
+        return path, target_waypoint, route_waypoints, traced_route
 
     def _managed_operation_allowed(self, actor_id, sensor=False):
         actor_id = int(actor_id)
@@ -2388,16 +2445,23 @@ class CarlaController(MovementRuntime, SimulationRuntime, ScenarioRuntime):
             "control_queue": control_queue,
         })
 
-    def set_vehicle_control_mode(self, session_id, actor_id, mode):
+    def set_vehicle_control_mode(self, session_id, actor_id, mode,
+                                 basic_agent_settings=None):
         if self._scenario_mutation_blocked("change vehicle control"):
             return False
         if not self._managed_operation_allowed(actor_id):
             return False
-        return self._queue_movement_command("set_vehicle_control_mode", {
+        payload = {
             "session_id": session_id,
             "actor_id": actor_id,
             "mode": mode,
-        })
+        }
+        if basic_agent_settings is not None:
+            payload["basic_agent_settings"] = dict(basic_agent_settings)
+        return self._queue_movement_command(
+            "set_vehicle_control_mode",
+            payload,
+        )
 
     def set_walker_ai_enabled(self, session_id, actor_id, enabled, speed):
         if self._scenario_mutation_blocked("change pedestrian control"):

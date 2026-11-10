@@ -7,6 +7,7 @@ import socket
 import threading
 import time
 
+from core.carla_pythonapi import load_basic_agent
 from utilities.functions import *
 from preview.movement import camera_transform_for_actor
 from movement.destination import (
@@ -65,11 +66,38 @@ _TM_EXCLUSIVE_OWNERS_LOCK = threading.Lock()
 class MovementRuntime:
     NAVIGATION_DEBUG_ENV = "CARLA_MANAGER_NAV_DEBUG"
     TRAFFIC_MANAGER_DEBUG_ENV = "CARLA_MANAGER_TM_DEBUG"
+    DESTINATION_EXECUTOR_ENV = "CARLA_MANAGER_DESTINATION_EXECUTOR"
+    DESTINATION_EXECUTOR_PATH = "path"
+    DESTINATION_EXECUTOR_ROUTE = "route"
+    DESTINATION_EXECUTOR_BASIC_AGENT = "basic_agent"
+    BASIC_AGENT_TARGET_SPEED_ENV = (
+        "CARLA_MANAGER_BASIC_AGENT_TARGET_SPEED"
+    )
+    BASIC_AGENT_DEFAULT_TARGET_SPEED_KMH = 40.0
+    BASIC_AGENT_ADAPTIVE_SPEED_ENV = (
+        "CARLA_MANAGER_BASIC_AGENT_ADAPTIVE_SPEED"
+    )
+    BASIC_AGENT_CONTROL_INTERVAL_SECONDS = 1.0 / 20.0
+    BASIC_AGENT_CURVATURE_SPAN_METERS = 6.0
+    BASIC_AGENT_CURVATURE_THRESHOLD = 0.01
+    BASIC_AGENT_CURVE_LATERAL_ACCELERATION = 1.5
+    BASIC_AGENT_CURVE_MIN_SPEED_KMH = 15.0
+    BASIC_AGENT_UNCERTAIN_SPEED_KMH = 20.0
+    BASIC_AGENT_MAX_PROFILE_DEVIATION_METERS = 5.0
+    BASIC_AGENT_BRAKING_DECELERATION = 1.8
+    BASIC_AGENT_SPEED_INCREASE_KMH_PER_SECOND = 6.0
+    BASIC_AGENT_SPEED_DECREASE_KMH_PER_SECOND = 36.0
+    BASIC_AGENT_PROGRESS_FORWARD_POINTS = 25
+    BASIC_AGENT_PROGRESS_BACKWARD_POINTS = 2
     NAVIGATION_DEBUG_INTERVAL_SECONDS = 5.0
     NAVIGATION_DEBUG_TRAJECTORY_LIMIT = 128
+    NAVIGATION_DEBUG_DIVERGENCE_DISTANCE = 5.0
+    NAVIGATION_DEBUG_DIVERGENCE_SAMPLES = 3
+    NAVIGATION_DEBUG_EXPECTED_ROUTE_POINTS = 5
 
     def _configure_traffic_manager(self):
         default_port = int(type(self).TRAFFIC_MANAGER_PORT)
+        application_port = int(type(self).APPLICATION_TRAFFIC_MANAGER_PORT)
         raw_port = str(os.environ.get("CARLA_MANAGER_TM_PORT", "")).strip()
         raw_exclusive = str(
             os.environ.get("CARLA_MANAGER_TM_EXCLUSIVE", "")
@@ -77,18 +105,30 @@ class MovementRuntime:
         exclusive_values = {
             "1", "true", "yes", "on",
         }
-        shared_values = {"", "0", "false", "no", "off"}
-        self.traffic_manager_exclusive = raw_exclusive in exclusive_values
+        shared_values = {"0", "false", "no", "off"}
+        default_configuration = not raw_exclusive and not raw_port
+        self.traffic_manager_exclusive = (
+            default_configuration
+            or raw_exclusive in exclusive_values
+        )
         self.traffic_manager_configuration_error = (
             None
-            if raw_exclusive in exclusive_values | shared_values
+            if (
+                not raw_exclusive
+                or raw_exclusive in exclusive_values | shared_values
+            )
             else (
                 "CARLA_MANAGER_TM_EXCLUSIVE must be one of: "
                 "1/true/yes/on or 0/false/no/off."
             )
         )
         try:
-            configured_port = default_port if not raw_port else int(raw_port)
+            if raw_port:
+                configured_port = int(raw_port)
+            elif self.traffic_manager_exclusive:
+                configured_port = application_port
+            else:
+                configured_port = default_port
             if not 1 <= configured_port <= 65535:
                 raise ValueError("port must be in range 1..65535")
         except (TypeError, ValueError) as error:
@@ -109,6 +149,31 @@ class MovementRuntime:
         self.TRAFFIC_MANAGER_PORT = configured_port
         self.traffic_manager_exclusive_owned = False
         self.traffic_manager_owner_controller_id = None
+
+    def _prepare_traffic_manager_for_world_change(self):
+        """Stop a locally owned TM before libcarla replaces its episode."""
+        if self.traffic_manager is None:
+            return False
+        if not getattr(self, "traffic_manager_exclusive", False):
+            raise RuntimeError(
+                "World change was cancelled because this application is "
+                "attached to a shared Traffic Manager. CARLA does not expose "
+                "whether that proxy owns local worker threads, so it cannot "
+                "be stopped safely without affecting other clients. Restart "
+                "with the default dedicated Traffic Manager or configure "
+                "CARLA_MANAGER_TM_EXCLUSIVE=1 and a reserved "
+                "CARLA_MANAGER_TM_PORT."
+            )
+        stopped = self._shutdown_exclusive_traffic_manager(
+            "world_changed",
+            strict=True,
+        )
+        if not stopped:
+            raise RuntimeError(
+                "The application-owned Traffic Manager did not stop; world "
+                "transition was cancelled."
+            )
+        return True
 
     def _traffic_manager_mode(self):
         return (
@@ -205,6 +270,7 @@ class MovementRuntime:
         self._release_exclusive_tm_contract()
         self.traffic_manager = None
         self.traffic_manager_world_id = None
+        self.traffic_manager_last_sync = None
         self._tm_debug_event("tm_shutdown_complete", reason=reason)
         return True
 
@@ -272,6 +338,17 @@ class MovementRuntime:
                                        error=None):
         with self.database.lock:
             state = self.database.vehicle_control_states.get(actor_id)
+            runtime = getattr(
+                self,
+                "vehicle_navigation_runtime",
+                {},
+            ).get(actor_id)
+            if state is not None:
+                state["basic_agent_settings_locked"] = bool(
+                    isinstance(runtime, dict)
+                    and runtime.get("executor")
+                    == self.DESTINATION_EXECUTOR_BASIC_AGENT
+                )
             state = state.copy() if state is not None else None
         if state is None:
             return
@@ -352,16 +429,26 @@ class MovementRuntime:
                     if exclusive else "shared_unknown"
                 ),
             )
+        exclusive = getattr(self, "traffic_manager_exclusive", True)
         world_sync = bool(world.get_settings().synchronous_mode)
-        self.traffic_manager.set_synchronous_mode(world_sync)
-        self.traffic_manager_last_sync = world_sync
+        if exclusive:
+            self.traffic_manager.set_synchronous_mode(world_sync)
+            self.traffic_manager_last_sync = world_sync
+            self._tm_debug_event(
+                "tm_sync_applied",
+                world=world,
+                map_name=debug_map_name,
+                requested_sync=world_sync,
+            )
+        else:
+            self.traffic_manager_last_sync = None
+            self._tm_debug_event(
+                "tm_sync_preserved_shared",
+                world=world,
+                map_name=debug_map_name,
+                world_sync=world_sync,
+            )
         self.traffic_manager_world_id = self._world_id(world)
-        self._tm_debug_event(
-            "tm_sync_applied",
-            world=world,
-            map_name=debug_map_name,
-            requested_sync=world_sync,
-        )
         previous = None
         if self._tm_debug_enabled():
             previous = _TM_DEBUG_PROCESS_PORTS.get(self.TRAFFIC_MANAGER_PORT)
@@ -384,6 +471,10 @@ class MovementRuntime:
     def _update_traffic_manager_sync(self, world):
         if self.traffic_manager is None:
             return
+        if not getattr(self, "traffic_manager_exclusive", True):
+            self.traffic_manager_world_id = self._world_id(world)
+            self.traffic_manager_last_sync = None
+            return
         world_sync = bool(world.get_settings().synchronous_mode)
         self.traffic_manager.set_synchronous_mode(world_sync)
         self.traffic_manager_last_sync = world_sync
@@ -398,6 +489,7 @@ class MovementRuntime:
         )
         self.traffic_manager = None
         self.traffic_manager_world_id = None
+        self.traffic_manager_last_sync = None
         return was_initialized
 
     @classmethod
@@ -504,65 +596,224 @@ class MovementRuntime:
         value = str(os.environ.get(cls.NAVIGATION_DEBUG_ENV, "")).strip()
         return value.casefold() in {"1", "true", "yes", "on"}
 
+    @classmethod
+    def _destination_executor(cls):
+        value = str(os.environ.get(cls.DESTINATION_EXECUTOR_ENV, "")).strip()
+        executor = value.casefold() or cls.DESTINATION_EXECUTOR_BASIC_AGENT
+        if executor not in {
+            cls.DESTINATION_EXECUTOR_PATH,
+            cls.DESTINATION_EXECUTOR_ROUTE,
+            cls.DESTINATION_EXECUTOR_BASIC_AGENT,
+        }:
+            raise RuntimeError(
+                f"{cls.DESTINATION_EXECUTOR_ENV} must be 'path', 'route', "
+                "or 'basic_agent'."
+            )
+        return executor
+
+    @staticmethod
+    def _destination_road_option_name(value):
+        if value is None:
+            raise RuntimeError(
+                "The planned route contains a missing RoadOption."
+            )
+        numeric_names = {
+            -1: "VOID",
+            1: "LEFT",
+            2: "RIGHT",
+            3: "STRAIGHT",
+            4: "LANEFOLLOW",
+            5: "CHANGELANELEFT",
+            6: "CHANGELANERIGHT",
+        }
+        name = getattr(value, "name", None)
+        if name:
+            return "".join(
+                character
+                for character in str(name).upper()
+                if character.isalnum()
+            )
+
+        raw_value = getattr(value, "value", value)
+        try:
+            numeric_value = int(raw_value)
+        except (TypeError, ValueError):
+            numeric_value = None
+        if numeric_value in numeric_names:
+            return numeric_names[numeric_value]
+
+        name = str(value).rsplit(".", 1)[-1]
+        return "".join(
+            character
+            for character in str(name).upper()
+            if character.isalnum()
+        )
+
+    @classmethod
+    def _destination_route_instructions(cls, route_waypoints):
+        supported_decisions = {
+            "LEFT": "Left",
+            "RIGHT": "Right",
+            "STRAIGHT": "Straight",
+        }
+        unsupported_lane_changes = {
+            "CHANGELANELEFT",
+            "CHANGELANERIGHT",
+        }
+        instructions = []
+        active_decision = None
+        for route_waypoint in route_waypoints:
+            road_option = (
+                route_waypoint.get("road_option")
+                if isinstance(route_waypoint, dict) else None
+            )
+            option_name = cls._destination_road_option_name(road_option)
+            if option_name == "LANEFOLLOW":
+                active_decision = None
+                continue
+            if option_name in unsupported_lane_changes:
+                raise RuntimeError(
+                    "The experimental set_route executor cannot represent "
+                    f"the planned {option_name} manoeuvre. Use the 'path' "
+                    "executor for routes requiring a specific lane."
+                )
+            instruction = supported_decisions.get(option_name)
+            if instruction is None:
+                raise RuntimeError(
+                    "The experimental set_route executor does not support "
+                    f"RoadOption {road_option!r}."
+                )
+            if option_name != active_decision:
+                instructions.append(instruction)
+                active_decision = option_name
+        return instructions
+
+    @classmethod
+    def _destination_route_has_lane_changes(cls, raw_plan):
+        lane_change_options = {
+            "CHANGELANELEFT",
+            "CHANGELANERIGHT",
+        }
+        for route_item in raw_plan:
+            road_option = (
+                route_item[1]
+                if isinstance(route_item, (tuple, list))
+                and len(route_item) > 1 else None
+            )
+            if (
+                cls._destination_road_option_name(road_option)
+                in lane_change_options
+            ):
+                return True
+        return False
+
+    @classmethod
+    def _prepare_vehicle_destination_execution(cls, route_waypoints):
+        executor = cls._destination_executor()
+        instructions = (
+            cls._destination_route_instructions(route_waypoints)
+            if executor == cls.DESTINATION_EXECUTOR_ROUTE else []
+        )
+        return executor, instructions
+
     @staticmethod
     def _navigation_debug_waypoint(waypoint):
         if not isinstance(waypoint, dict):
             return None
         return {
             field: waypoint.get(field)
-            for field in ("road_id", "section_id", "lane_id", "s")
+            for field in (
+                "road_id",
+                "section_id",
+                "lane_id",
+                "s",
+                "is_junction",
+                "road_option",
+                "location",
+                "yaw",
+            )
+            if field in waypoint
+        }
+
+    @staticmethod
+    def _traffic_manager_action_snapshot(action):
+        if not isinstance(action, (tuple, list)) or len(action) < 2:
+            return None
+        return {
+            "road_option": str(action[0]),
+            "waypoint": waypoint_snapshot(action[1]),
         }
 
     def _traffic_manager_actions_snapshot(self, actor):
         getter = getattr(self.traffic_manager, "get_all_actions", None)
-        if not callable(getter):
-            return {"available": False, "count": None, "next": None}
+        next_getter = getattr(self.traffic_manager, "get_next_action", None)
+        if not callable(getter) and not callable(next_getter):
+            return {
+                "available": False,
+                "count": None,
+                "current": None,
+                "next": None,
+                "upcoming": [],
+            }
         try:
-            actions = list(getter(actor) or [])
-            first = actions[0] if actions else None
-            if isinstance(first, (tuple, list)) and len(first) >= 2:
-                next_action = {
-                    "road_option": str(first[0]),
-                    "waypoint": waypoint_snapshot(first[1]),
-                }
-            else:
-                next_action = None
+            actions = list(getter(actor) or []) if callable(getter) else []
+            upcoming = [
+                snapshot
+                for snapshot in (
+                    self._traffic_manager_action_snapshot(action)
+                    for action in actions[:3]
+                )
+                if snapshot is not None
+            ]
+            next_action = (
+                self._traffic_manager_action_snapshot(next_getter(actor))
+                if callable(next_getter) else None
+            )
             return {
                 "available": True,
                 "count": len(actions),
+                "current": upcoming[0] if upcoming else None,
                 "next": next_action,
+                "upcoming": upcoming,
             }
         except Exception as error:
             return {
                 "available": False,
                 "count": None,
+                "current": None,
                 "next": None,
+                "upcoming": [],
                 "error": str(error),
             }
+
+    @staticmethod
+    def _navigation_debug_vehicle_yaw(actor):
+        try:
+            transform = actor.get_transform()
+            return float(transform.rotation.yaw)
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            return None
+
+    def _navigation_debug_expected_fragment(self, route_waypoints,
+                                            progress_index):
+        start = max(0, int(progress_index) - 1)
+        stop = min(
+            len(route_waypoints),
+            start + self.NAVIGATION_DEBUG_EXPECTED_ROUTE_POINTS,
+        )
+        return [
+            {
+                "index": index,
+                **self._navigation_debug_waypoint(route_waypoints[index]),
+            }
+            for index in range(start, stop)
+        ]
 
     def _update_vehicle_navigation_debug(self, actor_id, actor, runtime,
                                          location, current_waypoint,
                                          route_index, now, force=False):
         if not self._navigation_debug_enabled():
             return
-        trajectory = runtime.setdefault("actual_trajectory", [])
-        point = point_from_location(location)
-        if (
-            not trajectory
-            or math.hypot(
-                point["x"] - trajectory[-1]["x"],
-                point["y"] - trajectory[-1]["y"],
-            ) >= 1.0
-        ):
-            trajectory.append(point)
-            del trajectory[:-self.NAVIGATION_DEBUG_TRAJECTORY_LIMIT]
-
-        next_log = float(runtime.get("next_debug_log", 0.0))
-        if not force and now < next_log:
-            return
-        runtime["next_debug_log"] = (
-            now + self.NAVIGATION_DEBUG_INTERVAL_SECONDS
-        )
         planned_route = runtime.get("route") or []
         route_waypoints = runtime.get("route_waypoints") or []
         nearest_route_index = max(
@@ -583,14 +834,106 @@ class MovementRuntime:
             ),
             default=None,
         )
+        if (
+            deviation is not None
+            and deviation >= self.NAVIGATION_DEBUG_DIVERGENCE_DISTANCE
+        ):
+            divergence_samples = int(
+                runtime.get("debug_divergence_samples", 0)
+            ) + 1
+        else:
+            divergence_samples = 0
+        runtime["debug_divergence_samples"] = divergence_samples
+        first_divergence_due = (
+            runtime.get("first_divergence_report") is None
+            and divergence_samples >= self.NAVIGATION_DEBUG_DIVERGENCE_SAMPLES
+        )
+
+        trajectory = runtime.setdefault("actual_trajectory", [])
+        point = point_from_location(location)
+        if (
+            not trajectory
+            or math.hypot(
+                point["x"] - trajectory[-1]["x"],
+                point["y"] - trajectory[-1]["y"],
+            ) >= 1.0
+        ):
+            trajectory.append(point)
+            del trajectory[:-self.NAVIGATION_DEBUG_TRAJECTORY_LIMIT]
+
+        next_log = float(runtime.get("next_debug_log", 0.0))
+        periodic_report_due = force or now >= next_log
+        if not periodic_report_due and not first_divergence_due:
+            return
+        if periodic_report_due:
+            runtime["next_debug_log"] = (
+                now + self.NAVIGATION_DEBUG_INTERVAL_SECONDS
+            )
         current_snapshot = waypoint_snapshot(current_waypoint)
         tm_actions = self._traffic_manager_actions_snapshot(actor)
+        with self.database.lock:
+            state = self.database.vehicle_control_states.get(actor_id)
+            control_mode = None if state is None else state.get("mode")
+        if first_divergence_due:
+            runtime["first_divergence_report"] = {
+                "actor_id": int(actor_id),
+                "mode": control_mode,
+                "executor": runtime.get("executor"),
+                "instruction_count": len(
+                    runtime.get("route_instructions") or []
+                ),
+                "instructions": list(
+                    runtime.get("route_instructions") or []
+                ),
+                "position": point,
+                "yaw": self._navigation_debug_vehicle_yaw(actor),
+                "current_waypoint": self._navigation_debug_waypoint(
+                    current_snapshot
+                ),
+                "distance_to_planned_route": deviation,
+                "confirmation_samples": divergence_samples,
+                "nearest_route_index": nearest_route_index,
+                "progress_index": remaining_route_index,
+                "target": self._navigation_debug_waypoint(
+                    runtime.get("target_waypoint")
+                ),
+                "expected_route_fragment": (
+                    self._navigation_debug_expected_fragment(
+                        route_waypoints,
+                        remaining_route_index,
+                    )
+                ),
+                "traffic_manager_actions": tm_actions,
+            }
+            print(
+                "[NAV DIVERGENCE] "
+                f"{runtime['first_divergence_report']}"
+            )
         diagnostics = {
             "enabled": True,
             "actor_id": int(actor_id),
             "session_id": self.movement_preview_session_id,
             "mode": AUTOPILOT_DESTINATION,
-            "executor": "TrafficManager.set_path(carla.Location[])",
+            "executor": runtime.get(
+                "executor",
+                self.DESTINATION_EXECUTOR_PATH,
+            ),
+            "traffic_manager_executor": (
+                "BasicAgent.run_step()/Vehicle.apply_control()"
+                if runtime.get("executor")
+                == self.DESTINATION_EXECUTOR_BASIC_AGENT
+                else (
+                    "TrafficManager.set_route(str[])"
+                    if runtime.get("executor")
+                    == self.DESTINATION_EXECUTOR_ROUTE
+                    else "TrafficManager.set_path(carla.Location[])"
+                )
+            ),
+            "agent_done": bool(runtime.get("agent_done", False)),
+            "instruction_count": len(
+                runtime.get("route_instructions") or []
+            ),
+            "instructions": list(runtime.get("route_instructions") or []),
             "autopilot_enabled": True,
             "path_submission_id": runtime.get("path_submission_id"),
             "path_submission_count": runtime.get("path_submission_count", 1),
@@ -621,6 +964,12 @@ class MovementRuntime:
             ),
             "distance_to_planned_route": deviation,
             "traffic_manager_actions": tm_actions,
+            "divergence_observation": {
+                "threshold_meters": self.NAVIGATION_DEBUG_DIVERGENCE_DISTANCE,
+                "required_samples": self.NAVIGATION_DEBUG_DIVERGENCE_SAMPLES,
+                "current_samples": divergence_samples,
+            },
+            "first_divergence": runtime.get("first_divergence_report"),
         }
         with self.database.lock:
             state = self.database.vehicle_control_states.get(actor_id)
@@ -628,21 +977,24 @@ class MovementRuntime:
                 state["navigation_debug"] = diagnostics
         tm_next = tm_actions.get("next") or {}
         tm_next_waypoint = tm_next.get("waypoint") or {}
-        print(
-            "[NAV DEBUG] "
-            f"actor={actor_id} mode={AUTOPILOT_DESTINATION!r} "
-            f"submission={runtime.get('path_submission_id')} "
-            f"planned={len(planned_route)} "
-            f"remaining={max(0, len(planned_route) - remaining_route_index)} "
-            f"nearest_index={nearest_route_index} "
-            f"progress_index={remaining_route_index} "
-            f"current={current_snapshot.get('road_id') if current_snapshot else None}/"
-            f"{current_snapshot.get('lane_id') if current_snapshot else None} "
-            f"deviation={None if deviation is None else round(deviation, 2)}m "
-            f"tm_actions={tm_actions.get('count')} "
-            f"tm_next={tm_next_waypoint.get('road_id')}/"
-            f"{tm_next_waypoint.get('lane_id')}"
-        )
+        if periodic_report_due:
+            print(
+                "[NAV DEBUG] "
+                f"actor={actor_id} mode={AUTOPILOT_DESTINATION!r} "
+                f"executor={runtime.get('executor')} "
+                f"submission={runtime.get('path_submission_id')} "
+                f"planned={len(planned_route)} "
+                f"instructions={len(runtime.get('route_instructions') or [])} "
+                f"remaining={max(0, len(planned_route) - remaining_route_index)} "
+                f"nearest_index={nearest_route_index} "
+                f"progress_index={remaining_route_index} "
+                f"current={current_snapshot.get('road_id') if current_snapshot else None}/"
+                f"{current_snapshot.get('lane_id') if current_snapshot else None} "
+                f"deviation={None if deviation is None else round(deviation, 2)}m "
+                f"tm_actions={tm_actions.get('count')} "
+                f"tm_next={tm_next_waypoint.get('road_id')}/"
+                f"{tm_next_waypoint.get('lane_id')}"
+            )
 
     @classmethod
     def _nearest_route_index(cls, location, route):
@@ -700,6 +1052,386 @@ class MovementRuntime:
         except Exception as error:
             self.dashboard_monitor.record_error(error)
 
+    def _clear_vehicle_navigation_route(self, actor):
+        if self.traffic_manager is None:
+            return
+        try:
+            self.traffic_manager.set_route(actor, [], True)
+        except Exception as error:
+            self.dashboard_monitor.record_error(error)
+
+    def _clear_vehicle_navigation_executor(self, actor, executor):
+        if executor == self.DESTINATION_EXECUTOR_ROUTE:
+            self._clear_vehicle_navigation_route(actor)
+        elif executor == self.DESTINATION_EXECUTOR_PATH:
+            self._clear_vehicle_navigation_path(actor)
+
+    def _basic_agent_control_is_active(self):
+        return any(
+            runtime.get("executor")
+            == self.DESTINATION_EXECUTOR_BASIC_AGENT
+            and not runtime.get("arrival_braking", False)
+            for runtime in getattr(
+                self,
+                "vehicle_navigation_runtime",
+                {},
+            ).values()
+            if isinstance(runtime, dict)
+        )
+
+    @classmethod
+    def _basic_agent_target_speed(cls):
+        raw_value = str(os.environ.get(
+            cls.BASIC_AGENT_TARGET_SPEED_ENV,
+            "",
+        )).strip()
+        if not raw_value:
+            return cls.BASIC_AGENT_DEFAULT_TARGET_SPEED_KMH
+        try:
+            target_speed = float(raw_value)
+        except (TypeError, ValueError) as error:
+            raise RuntimeError(
+                f"{cls.BASIC_AGENT_TARGET_SPEED_ENV} must be a positive "
+                "speed in km/h."
+            ) from error
+        if not math.isfinite(target_speed) or target_speed <= 0.0:
+            raise RuntimeError(
+                f"{cls.BASIC_AGENT_TARGET_SPEED_ENV} must be a positive "
+                "speed in km/h."
+            )
+        return target_speed
+
+    @classmethod
+    def _basic_agent_adaptive_speed_enabled(cls):
+        raw_value = str(os.environ.get(
+            cls.BASIC_AGENT_ADAPTIVE_SPEED_ENV,
+            "1",
+        )).strip().casefold()
+        if raw_value in {"1", "true", "yes", "on"}:
+            return True
+        if raw_value in {"0", "false", "no", "off"}:
+            return False
+        raise RuntimeError(
+            f"{cls.BASIC_AGENT_ADAPTIVE_SPEED_ENV} must be 0/1, "
+            "false/true, no/yes, or off/on."
+        )
+
+    @classmethod
+    def _basic_agent_settings(cls, settings=None):
+        if settings is None:
+            return {
+                "maximum_speed": cls._basic_agent_target_speed(),
+                "adaptive_speed": (
+                    cls._basic_agent_adaptive_speed_enabled()
+                ),
+            }
+        if not isinstance(settings, dict):
+            raise RuntimeError(
+                "BasicAgent settings must be a dictionary."
+            )
+        raw_speed = (
+            settings["maximum_speed"]
+            if "maximum_speed" in settings
+            else cls._basic_agent_target_speed()
+        )
+        if isinstance(raw_speed, bool):
+            raise RuntimeError(
+                "BasicAgent maximum speed must be between 10 and 90 km/h."
+            )
+        try:
+            maximum_speed = float(raw_speed)
+        except (TypeError, ValueError) as error:
+            raise RuntimeError(
+                "BasicAgent maximum speed must be between 10 and 90 km/h."
+            ) from error
+        if (
+            not math.isfinite(maximum_speed)
+            or not 10.0 <= maximum_speed <= 90.0
+        ):
+            raise RuntimeError(
+                "BasicAgent maximum speed must be between 10 and 90 km/h."
+            )
+        adaptive_speed = (
+            settings["adaptive_speed"]
+            if "adaptive_speed" in settings
+            else cls._basic_agent_adaptive_speed_enabled()
+        )
+        if not isinstance(adaptive_speed, bool):
+            raise RuntimeError(
+                "BasicAgent adaptive speed setting must be boolean."
+            )
+        return {
+            "maximum_speed": maximum_speed,
+            "adaptive_speed": adaptive_speed,
+        }
+
+    @classmethod
+    def _basic_agent_speed_profile(cls, route, cruise_speed):
+        cruise_speed = float(cruise_speed)
+        if len(route) < 3:
+            uncertain_speed = min(
+                cruise_speed,
+                cls.BASIC_AGENT_UNCERTAIN_SPEED_KMH,
+            )
+            return tuple(uncertain_speed for _point in route)
+
+        distances = [0.0]
+        for previous, current in zip(route, route[1:]):
+            distances.append(
+                distances[-1]
+                + cls._vehicle_xy_distance(previous, current)
+            )
+
+        profile = [cruise_speed] * len(route)
+        span = cls.BASIC_AGENT_CURVATURE_SPAN_METERS
+        for index in range(1, len(route) - 1):
+            previous_index = index - 1
+            while (
+                previous_index > 0
+                and distances[index] - distances[previous_index] < span
+            ):
+                previous_index -= 1
+            next_index = index + 1
+            while (
+                next_index < len(route) - 1
+                and distances[next_index] - distances[index] < span
+            ):
+                next_index += 1
+
+            previous = route[previous_index]
+            current = route[index]
+            following = route[next_index]
+            side_a = cls._vehicle_xy_distance(previous, current)
+            side_b = cls._vehicle_xy_distance(current, following)
+            side_c = cls._vehicle_xy_distance(previous, following)
+            denominator = side_a * side_b * side_c
+            if denominator <= 1e-6:
+                profile[index] = min(
+                    cruise_speed,
+                    cls.BASIC_AGENT_UNCERTAIN_SPEED_KMH,
+                )
+                continue
+            cross = abs(
+                (float(current.x) - float(previous.x))
+                * (float(following.y) - float(previous.y))
+                - (float(current.y) - float(previous.y))
+                * (float(following.x) - float(previous.x))
+            )
+            curvature = 2.0 * cross / denominator
+            if curvature < cls.BASIC_AGENT_CURVATURE_THRESHOLD:
+                continue
+            curve_speed = 3.6 * math.sqrt(
+                cls.BASIC_AGENT_CURVE_LATERAL_ACCELERATION / curvature
+            )
+            profile[index] = min(
+                cruise_speed,
+                max(cls.BASIC_AGENT_CURVE_MIN_SPEED_KMH, curve_speed),
+            )
+
+        deceleration = cls.BASIC_AGENT_BRAKING_DECELERATION
+        for index in range(len(profile) - 2, -1, -1):
+            segment_length = max(
+                0.0,
+                distances[index + 1] - distances[index],
+            )
+            following_speed = profile[index + 1] / 3.6
+            braking_speed = 3.6 * math.sqrt(
+                following_speed * following_speed
+                + 2.0 * deceleration * segment_length
+            )
+            profile[index] = min(profile[index], braking_speed)
+        return tuple(profile)
+
+    @classmethod
+    def _basic_agent_profile_index(cls, location, route, progress_index):
+        if not route:
+            return 0
+        progress_index = max(0, min(int(progress_index), len(route) - 1))
+        start = max(
+            0,
+            progress_index - cls.BASIC_AGENT_PROGRESS_BACKWARD_POINTS,
+        )
+        stop = min(
+            len(route),
+            progress_index + cls.BASIC_AGENT_PROGRESS_FORWARD_POINTS + 1,
+        )
+        nearest_index = min(
+            range(start, stop),
+            key=lambda index: cls._vehicle_xy_distance(
+                location,
+                route[index],
+            ),
+        )
+        return max(progress_index, nearest_index)
+
+    @classmethod
+    def _basic_agent_limited_speed(cls, current_speed, desired_speed,
+                                   elapsed):
+        elapsed = max(
+            cls.BASIC_AGENT_CONTROL_INTERVAL_SECONDS,
+            min(float(elapsed), 0.5),
+        )
+        if desired_speed >= current_speed:
+            return min(
+                desired_speed,
+                current_speed
+                + cls.BASIC_AGENT_SPEED_INCREASE_KMH_PER_SECOND * elapsed,
+            )
+        return max(
+            desired_speed,
+            current_speed
+            - cls.BASIC_AGENT_SPEED_DECREASE_KMH_PER_SECOND * elapsed,
+        )
+
+    def _update_basic_agent_adaptive_speed(self, actor, runtime, now):
+        profile = runtime.get("basic_agent_speed_profile")
+        if not profile:
+            return
+        route = runtime.get("route") or ()
+        progress_floor = max(
+            int(runtime.get("basic_agent_profile_index", 0)),
+            int(runtime.get("max_route_index", 0)),
+        )
+        location = actor.get_location()
+        progress_index = self._basic_agent_profile_index(
+            location,
+            route,
+            progress_floor,
+        )
+        runtime["basic_agent_profile_index"] = progress_index
+        desired_speed = min(
+            float(runtime["basic_agent_target_speed"]),
+            float(profile[progress_index]),
+        )
+        profile_deviation = self._vehicle_xy_distance(
+            location,
+            route[progress_index],
+        )
+        if (
+            profile_deviation
+            > self.BASIC_AGENT_MAX_PROFILE_DEVIATION_METERS
+        ):
+            desired_speed = min(
+                desired_speed,
+                self.BASIC_AGENT_UNCERTAIN_SPEED_KMH,
+            )
+        current_speed = float(runtime.get(
+            "basic_agent_applied_speed",
+            runtime["basic_agent_target_speed"],
+        ))
+        previous_update = float(runtime.get(
+            "basic_agent_speed_updated_at",
+            now - self.BASIC_AGENT_CONTROL_INTERVAL_SECONDS,
+        ))
+        applied_speed = self._basic_agent_limited_speed(
+            current_speed,
+            desired_speed,
+            now - previous_update,
+        )
+        if abs(applied_speed - current_speed) >= 0.05:
+            runtime["agent"].set_target_speed(applied_speed)
+        runtime["basic_agent_applied_speed"] = applied_speed
+        runtime["basic_agent_speed_updated_at"] = now
+
+    def _fail_basic_agent_navigation(self, actor_id, actor, error):
+        self.dashboard_monitor.record_error(error)
+        getattr(self, "vehicle_navigation_runtime", {}).pop(actor_id, None)
+        if actor is not None and getattr(actor, "is_alive", False):
+            try:
+                actor.set_autopilot(False, self.TRAFFIC_MANAGER_PORT)
+                self._safe_stop_vehicle(actor)
+            except Exception as cleanup_error:
+                self.dashboard_monitor.record_error(cleanup_error)
+        with self.database.lock:
+            state = self.database.vehicle_control_states.get(actor_id)
+            if state is not None:
+                state.update({
+                    "navigation_status": VEHICLE_STATUS_FAILED,
+                    "status": f"BasicAgent navigation failed: {error}",
+                    "autopilot_enabled": False,
+                    "traffic_manager_port": None,
+                    "error": str(error),
+                })
+        self._publish_vehicle_control_state(actor_id, error=error)
+
+    def _service_basic_agent_control(self, world, frame=None, force=False):
+        transition = getattr(self, "world_transition_event", None)
+        if transition is not None and transition.is_set():
+            return
+        runtime_store = getattr(self, "vehicle_navigation_runtime", None)
+        if not runtime_store:
+            return
+        world_id = self._world_id(world)
+        now = time.monotonic()
+        for actor_id, runtime in list(runtime_store.items()):
+            if (
+                runtime.get("executor")
+                != self.DESTINATION_EXECUTOR_BASIC_AGENT
+            ):
+                continue
+            if runtime.get("world_id") != world_id:
+                runtime_store.pop(actor_id, None)
+                with self.database.lock:
+                    state = self.database.vehicle_control_states.get(actor_id)
+                    if state is not None:
+                        state.update({
+                            "navigation_status": VEHICLE_STATUS_CANCELLED,
+                            "status": (
+                                "Destination navigation cancelled because "
+                                "the CARLA world changed."
+                            ),
+                            "route": None,
+                            "autopilot_enabled": False,
+                            "traffic_manager_port": None,
+                            "error": None,
+                        })
+                continue
+            if runtime.get("arrival_braking", False):
+                continue
+            if frame is not None and runtime.get("last_agent_frame") == frame:
+                continue
+            if (
+                not force
+                and frame is None
+                and now < runtime.get("next_agent_step", 0.0)
+            ):
+                continue
+
+            actor = None
+            try:
+                with self.database.lock:
+                    state = self.database.vehicle_control_states.get(actor_id)
+                    mode = None if state is None else state.get("mode")
+                if mode != AUTOPILOT_DESTINATION:
+                    runtime_store.pop(actor_id, None)
+                    continue
+                actor = self._get_managed_vehicle(actor_id)
+                self._update_basic_agent_adaptive_speed(actor, runtime, now)
+                control = runtime["agent"].run_step()
+                actor.apply_control(control)
+                runtime["agent_done"] = bool(runtime["agent"].done())
+                runtime["next_agent_step"] = (
+                    now + self.BASIC_AGENT_CONTROL_INTERVAL_SECONDS
+                )
+                if frame is not None:
+                    runtime["last_agent_frame"] = frame
+            except Exception as error:
+                self._fail_basic_agent_navigation(actor_id, actor, error)
+
+    def before_simulation_tick(self, world):
+        self._service_basic_agent_control(
+            world,
+            frame=getattr(self.simulation_manager, "last_frame", None),
+            force=True,
+        )
+
+    @staticmethod
+    def _configure_vehicle_lane_change_profile(traffic_manager, actor,
+                                                auto_lane_change):
+        traffic_manager.auto_lane_change(actor, bool(auto_lane_change))
+        traffic_manager.random_left_lanechange_percentage(actor, 0)
+        traffic_manager.random_right_lanechange_percentage(actor, 0)
+
     def _cancel_vehicle_navigation(self, actor_id, actor=None,
                                    status=VEHICLE_STATUS_CANCELLED,
                                    stop_vehicle=False, clear_path=True):
@@ -708,12 +1440,16 @@ class MovementRuntime:
             runtime_store = {}
             self.vehicle_navigation_runtime = runtime_store
         runtime = runtime_store.pop(actor_id, None)
+        executor = (
+            runtime.get("executor")
+            if isinstance(runtime, dict) else self.DESTINATION_EXECUTOR_PATH
+        )
         if (
             clear_path
             and actor is not None
             and getattr(actor, "is_alive", False)
         ):
-            self._clear_vehicle_navigation_path(actor)
+            self._clear_vehicle_navigation_executor(actor, executor)
         if (
             stop_vehicle
             and actor is not None
@@ -737,8 +1473,11 @@ class MovementRuntime:
     def _activate_vehicle_destination(self, world, actor, actor_id,
                                       destination_location, destination,
                                       path, target_waypoint,
-                                      route_waypoints):
-        traffic_manager = self._ensure_traffic_manager(world)
+                                       route_waypoints, raw_plan,
+                                       has_lane_changes, executor,
+                                       route_instructions,
+                                       basic_agent_settings=None):
+        traffic_manager = None
         execution_path = [
             carla.Location(
                 x=float(point.x),
@@ -747,8 +1486,70 @@ class MovementRuntime:
             )
             for point in path
         ]
-        actor.set_autopilot(True, self.TRAFFIC_MANAGER_PORT)
-        traffic_manager.set_path(actor, execution_path, True)
+        runtime_store = getattr(self, "vehicle_navigation_runtime", None)
+        if runtime_store is None:
+            runtime_store = {}
+            self.vehicle_navigation_runtime = runtime_store
+        # Detach the previous executor before any new CARLA control is
+        # installed.  The controller worker is single-threaded, but keeping
+        # the old BasicAgent registered here would allow it to resume on the
+        # next service pass if initialization of the replacement failed.
+        previous_runtime = runtime_store.pop(actor_id, None) or {}
+        previous_executor = previous_runtime.get("executor")
+        previous_runtime = None
+
+        agent = None
+        basic_agent_target_speed = None
+        basic_agent_speed_profile = None
+        if executor == self.DESTINATION_EXECUTOR_BASIC_AGENT:
+            basic_agent_settings = self._basic_agent_settings(
+                basic_agent_settings
+            )
+            basic_agent_target_speed = basic_agent_settings[
+                "maximum_speed"
+            ]
+            if previous_executor in (
+                self.DESTINATION_EXECUTOR_PATH,
+                self.DESTINATION_EXECUTOR_ROUTE,
+            ):
+                self._clear_vehicle_navigation_executor(
+                    actor,
+                    previous_executor,
+                )
+            actor.set_autopilot(False, self.TRAFFIC_MANAGER_PORT)
+            basic_agent_class, agent_error = load_basic_agent()
+            if basic_agent_class is None:
+                raise RuntimeError(agent_error)
+            if basic_agent_settings["adaptive_speed"]:
+                basic_agent_speed_profile = self._basic_agent_speed_profile(
+                    execution_path,
+                    basic_agent_target_speed,
+                )
+            agent = basic_agent_class(
+                actor,
+                target_speed=basic_agent_target_speed,
+                map_inst=world.get_map(),
+            )
+            agent.set_global_plan(raw_plan)
+        else:
+            traffic_manager = self._ensure_traffic_manager(world)
+            actor.set_autopilot(True, self.TRAFFIC_MANAGER_PORT)
+            self._configure_vehicle_lane_change_profile(
+                traffic_manager,
+                actor,
+                auto_lane_change=False,
+            )
+            if executor == self.DESTINATION_EXECUTOR_ROUTE:
+                traffic_manager.set_path(actor, [], True)
+                traffic_manager.set_route(
+                    actor,
+                    list(route_instructions),
+                    True,
+                )
+            else:
+                if previous_executor == self.DESTINATION_EXECUTOR_ROUTE:
+                    traffic_manager.set_route(actor, [], True)
+                traffic_manager.set_path(actor, execution_path, True)
         current_location = actor.get_location()
         target_snapshot = waypoint_snapshot(target_waypoint)
         destination = dict(destination)
@@ -757,10 +1558,10 @@ class MovementRuntime:
         distance = self._vehicle_xy_distance(current_location, route_target)
         world_id = self._world_id(world)
         now = time.monotonic()
-        runtime_store = getattr(self, "vehicle_navigation_runtime", None)
-        if runtime_store is None:
-            runtime_store = {}
-            self.vehicle_navigation_runtime = runtime_store
+        basic_agent_profile_index = (
+            self._nearest_route_index(current_location, execution_path)
+            if basic_agent_speed_profile else 0
+        )
         submission_counts = getattr(
             self,
             "vehicle_navigation_submission_counts",
@@ -786,6 +1587,19 @@ class MovementRuntime:
             "route": tuple(path),
             "target_waypoint": target_snapshot,
             "route_waypoints": route_waypoints,
+            "raw_plan": raw_plan,
+            "has_lane_changes": bool(has_lane_changes),
+            "agent": agent,
+            "agent_done": False,
+            "basic_agent_target_speed": basic_agent_target_speed,
+            "basic_agent_speed_profile": basic_agent_speed_profile,
+            "basic_agent_profile_index": basic_agent_profile_index,
+            "basic_agent_applied_speed": basic_agent_target_speed,
+            "basic_agent_speed_updated_at": now,
+            "next_agent_step": 0.0,
+            "last_agent_frame": None,
+            "executor": executor,
+            "route_instructions": tuple(route_instructions),
             "max_route_index": self._nearest_route_index(current_location, path),
             "best_distance": distance,
             "next_check": 0.0,
@@ -797,6 +1611,8 @@ class MovementRuntime:
             "path_submission_count": submission_counts[actor_id],
             "actual_trajectory": [point_from_location(current_location)],
             "next_debug_log": 0.0,
+            "debug_divergence_samples": 0,
+            "first_divergence_report": None,
         }
         with self.database.lock:
             state = self.database.vehicle_control_states[actor_id]
@@ -808,7 +1624,10 @@ class MovementRuntime:
                 "destination": destination,
                 "route": {
                     "kind": "planned",
+                    "executor": executor,
                     "waypoint_count": len(path),
+                    "instruction_count": len(route_instructions),
+                    "instructions": list(route_instructions),
                     "sampling_resolution": self.VEHICLE_NAVIGATION_SAMPLING_RESOLUTION,
                     "waypoints": route_waypoints,
                 },
@@ -816,12 +1635,24 @@ class MovementRuntime:
                 "distance_to_destination": distance,
                 "current_speed": self._vehicle_speed(actor),
                 "world_id": world_id,
-                "autopilot_enabled": True,
+                "autopilot_enabled": (
+                    executor != self.DESTINATION_EXECUTOR_BASIC_AGENT
+                ),
                 "autopilot_state_source": "local",
-                "traffic_manager_port": self.TRAFFIC_MANAGER_PORT,
+                "traffic_manager_port": (
+                    None
+                    if executor == self.DESTINATION_EXECUTOR_BASIC_AGENT
+                    else self.TRAFFIC_MANAGER_PORT
+                ),
                 "input_fresh": False,
                 "error": None,
                 "navigation_debug": None,
+                "destination_executor": executor,
+                "basic_agent_settings": (
+                    dict(basic_agent_settings)
+                    if executor == self.DESTINATION_EXECUTOR_BASIC_AGENT
+                    else None
+                ),
             })
         if self._navigation_debug_enabled():
             self._update_vehicle_navigation_debug(
@@ -947,6 +1778,15 @@ class MovementRuntime:
 
                 navigation_status = VEHICLE_STATUS_NAVIGATING
                 status = "Destination navigation is active."
+                if (
+                    runtime.get("executor")
+                    == self.DESTINATION_EXECUTOR_BASIC_AGENT
+                    and runtime.get("agent_done", False)
+                ):
+                    status = (
+                        "BasicAgent plan is complete; confirming the selected "
+                        "Destination point and lane."
+                    )
                 if runtime["arrival_braking"]:
                     status = "Destination reached; vehicle is braking."
                     if (
@@ -998,6 +1838,8 @@ class MovementRuntime:
                             "autopilot_enabled": (
                                 navigation_status == VEHICLE_STATUS_NAVIGATING
                                 and not runtime["arrival_braking"]
+                                and runtime.get("executor")
+                                != self.DESTINATION_EXECUTOR_BASIC_AGENT
                             ),
                             "error": (
                                 status
@@ -1012,7 +1854,13 @@ class MovementRuntime:
                 if actor is not None and getattr(actor, "is_alive", False):
                     try:
                         actor.set_autopilot(False, self.TRAFFIC_MANAGER_PORT)
-                        self._clear_vehicle_navigation_path(actor)
+                        self._clear_vehicle_navigation_executor(
+                            actor,
+                            runtime.get(
+                                "executor",
+                                self.DESTINATION_EXECUTOR_PATH,
+                            ),
+                        )
                         self._safe_stop_vehicle(actor)
                     except Exception as cleanup_error:
                         self.dashboard_monitor.record_error(cleanup_error)
@@ -1033,6 +1881,7 @@ class MovementRuntime:
         requested_mode = normalize_vehicle_control_mode(data["mode"])
         actor = None
         destination_activation_started = False
+        prepared_destination = None
         try:
             if requested_mode not in VEHICLE_CONTROL_MODES:
                 raise ValueError(f"Unknown vehicle control mode: {requested_mode}")
@@ -1049,16 +1898,26 @@ class MovementRuntime:
                 previous.get("mode", NO_CONTROL)
             )
 
-            prepared_destination = None
             if requested_mode == AUTOPILOT_DESTINATION:
                 destination_location, destination = (
                     self._vehicle_destination_for_world(actor_id, world)
                 )
-                route, target_waypoint, route_waypoints = self._plan_vehicle_route(
+                (
+                    route,
+                    target_waypoint,
+                    route_waypoints,
+                    raw_plan,
+                ) = self._plan_vehicle_route(
                     world,
                     actor,
                     destination_location,
                     destination.get("target_waypoint"),
+                )
+                has_lane_changes = self._destination_route_has_lane_changes(
+                    raw_plan
+                )
+                executor, route_instructions = (
+                    self._prepare_vehicle_destination_execution(route_waypoints)
                 )
                 prepared_destination = (
                     destination_location,
@@ -1066,6 +1925,11 @@ class MovementRuntime:
                     route,
                     target_waypoint,
                     route_waypoints,
+                    raw_plan,
+                    has_lane_changes,
+                    executor,
+                    route_instructions,
+                    data.get("basic_agent_settings"),
                 )
 
             if previous_mode == MANUAL_CONTROL and requested_mode != MANUAL_CONTROL:
@@ -1081,9 +1945,9 @@ class MovementRuntime:
                 previous_mode in (AUTOPILOT_FREE_ROAM, AUTOPILOT_DESTINATION)
                 and requested_mode != previous_mode
             ):
-                actor.set_autopilot(False, self.TRAFFIC_MANAGER_PORT)
                 if previous_mode == AUTOPILOT_DESTINATION:
                     self._cancel_vehicle_navigation(actor_id, actor=actor)
+                actor.set_autopilot(False, self.TRAFFIC_MANAGER_PORT)
                 with self.database.lock:
                     state = self.database.vehicle_control_states[actor_id]
                     state.update({
@@ -1094,9 +1958,14 @@ class MovementRuntime:
                     })
 
             if requested_mode == AUTOPILOT_FREE_ROAM:
-                self._ensure_traffic_manager(world)
+                traffic_manager = self._ensure_traffic_manager(world)
                 self._clear_vehicle_navigation_path(actor)
                 actor.set_autopilot(True, self.TRAFFIC_MANAGER_PORT)
+                self._configure_vehicle_lane_change_profile(
+                    traffic_manager,
+                    actor,
+                    auto_lane_change=True,
+                )
                 self._tm_debug_event(
                     "free_roam_activated",
                     world=world,
@@ -1168,16 +2037,28 @@ class MovementRuntime:
             if (
                 requested_mode == AUTOPILOT_DESTINATION
                 and destination_activation_started
+            ):
+                # Removing the runtime first guarantees that neither the old
+                # nor a partly initialized replacement agent can receive a
+                # later run_step() after activation has failed.
+                self.vehicle_navigation_runtime.pop(actor_id, None)
+            if (
+                requested_mode == AUTOPILOT_DESTINATION
+                and destination_activation_started
                 and actor is not None
                 and getattr(actor, "is_alive", False)
             ):
                 try:
                     actor.set_autopilot(False, self.TRAFFIC_MANAGER_PORT)
-                    self._clear_vehicle_navigation_path(actor)
+                    executor = (
+                        prepared_destination[-2]
+                        if prepared_destination is not None
+                        else self.DESTINATION_EXECUTOR_PATH
+                    )
+                    self._clear_vehicle_navigation_executor(actor, executor)
                     self._safe_stop_vehicle(actor)
                 except Exception as cleanup_error:
                     self.dashboard_monitor.record_error(cleanup_error)
-                self.vehicle_navigation_runtime.pop(actor_id, None)
             with self.database.lock:
                 state = self.database.vehicle_control_states.get(actor_id)
                 if state is not None:
@@ -1288,7 +2169,7 @@ class MovementRuntime:
                 })
         self._publish_vehicle_control_state(actor_id, error=error)
 
-    def _close_manual_session(self, actor_id):
+    def _close_manual_session(self, actor_id, strict=False):
         with self.database.lock:
             state = self.database.vehicle_control_states.get(actor_id)
             state_copy = state.copy() if state is not None else None
@@ -1300,6 +2181,10 @@ class MovementRuntime:
                 self._safe_stop_vehicle(actor, state_copy.get("reverse", False))
         except Exception as error:
             self.dashboard_monitor.record_error(error)
+            if strict:
+                raise RuntimeError(
+                    f"Could not stop Manual Control for actor {actor_id}."
+                ) from error
         with self.database.lock:
             state = self.database.vehicle_control_states.get(actor_id)
             if state is not None and state.get("mode") == MANUAL_CONTROL:
@@ -1313,14 +2198,14 @@ class MovementRuntime:
         self._publish_vehicle_control_state(actor_id)
 
     def _release_vehicle_control(self, actor_id, disable_autopilot,
-                                 clear_path=True):
+                                 clear_path=True, strict=False):
         self._tm_debug_event(
             "vehicle_control_release_begin",
             actor_id=actor_id,
             disable_autopilot=bool(disable_autopilot),
             clear_path=bool(clear_path),
         )
-        self._close_manual_session(actor_id)
+        self._close_manual_session(actor_id, strict=strict)
         with self.database.lock:
             actor = self.database.actors_db.actors.get(actor_id)
             state = self.database.vehicle_control_states.get(actor_id)
@@ -1357,6 +2242,10 @@ class MovementRuntime:
                 )
             except Exception as error:
                 self.dashboard_monitor.record_error(error)
+                if strict:
+                    raise RuntimeError(
+                        f"Could not disable autopilot for actor {actor_id}."
+                    ) from error
         with self.database.lock:
             state = self.database.vehicle_control_states.get(actor_id)
             if state is not None:
@@ -1376,7 +2265,7 @@ class MovementRuntime:
         )
 
     def _shutdown_vehicle_controls(self, disable_autopilot,
-                                   clear_paths=True):
+                                   clear_paths=True, strict=False):
         try:
             with self.database.lock:
                 actor_ids = set(self.database.vehicle_control_states)
@@ -1386,12 +2275,15 @@ class MovementRuntime:
                     actor_id,
                     disable_autopilot,
                     clear_path=clear_paths,
+                    strict=strict,
                 )
         except Exception as error:
             try:
                 self.dashboard_monitor.record_error(error)
             except Exception:
                 pass
+            if strict:
+                raise
         finally:
             getattr(self, "vehicle_navigation_runtime", {}).clear()
             getattr(self, "vehicle_navigation_submission_counts", {}).clear()
@@ -2537,7 +3429,7 @@ class MovementRuntime:
             error=error,
         )
 
-    def _destroy_walker_ai(self, walker_id, remove_state=False):
+    def _destroy_walker_ai(self, walker_id, remove_state=False, strict=False):
         try:
             with self.database.lock:
                 walker = self.database.actors_db.actors.get(walker_id)
@@ -2549,19 +3441,32 @@ class MovementRuntime:
                 )
         except Exception as error:
             self.dashboard_monitor.record_error(error)
-        controller = self.walker_ai_controllers.pop(walker_id, None)
-        self.walker_ai_runtime.pop(walker_id, None)
+            if strict:
+                raise RuntimeError(
+                    f"Could not stop walker {walker_id} safely."
+                ) from error
+        controller = self.walker_ai_controllers.get(walker_id)
         if controller is not None:
             try:
                 if getattr(controller, "is_alive", False):
                     controller.stop()
             except Exception as error:
                 self.dashboard_monitor.record_error(error)
+                if strict:
+                    raise RuntimeError(
+                        f"Could not stop walker controller {walker_id}."
+                    ) from error
             try:
                 if getattr(controller, "is_alive", False):
                     controller.destroy()
             except Exception as error:
                 self.dashboard_monitor.record_error(error)
+                if strict:
+                    raise RuntimeError(
+                        f"Could not destroy walker controller {walker_id}."
+                    ) from error
+        self.walker_ai_controllers.pop(walker_id, None)
+        self.walker_ai_runtime.pop(walker_id, None)
         with self.database.lock:
             if remove_state:
                 self.database.walker_ai_states.pop(walker_id, None)
@@ -2582,22 +3487,29 @@ class MovementRuntime:
                         ),
                     })
 
-    def _shutdown_walker_ai(self):
+    def _shutdown_walker_ai(self, strict=False):
         try:
             with self.database.lock:
                 walker_ids = set(self.database.walker_ai_states)
             walker_ids.update(self.walker_ai_controllers)
             walker_ids.update(self.walker_ai_runtime)
             for walker_id in list(walker_ids):
-                self._destroy_walker_ai(walker_id, remove_state=False)
+                self._destroy_walker_ai(
+                    walker_id,
+                    remove_state=False,
+                    strict=strict,
+                )
         except Exception as error:
             try:
                 self.dashboard_monitor.record_error(error)
             except Exception:
                 pass
+            if strict:
+                raise
         finally:
-            getattr(self, "walker_ai_controllers", {}).clear()
-            getattr(self, "walker_ai_runtime", {}).clear()
+            if not strict:
+                getattr(self, "walker_ai_controllers", {}).clear()
+                getattr(self, "walker_ai_runtime", {}).clear()
 
     def _start_movement_preview(self, world, data):
         session_id = data["session_id"]
@@ -2765,7 +3677,7 @@ class MovementRuntime:
                 },
             ))
 
-    def cleanup_movement_preview(self, reason="preview_stopped"):
+    def cleanup_movement_preview(self, reason="preview_stopped", strict=False):
         camera = self.movement_preview_camera
         publisher = self.movement_preview_publisher
         session_id = self.movement_preview_session_id
@@ -2789,6 +3701,52 @@ class MovementRuntime:
         if actor_id is not None:
             self._close_manual_session(actor_id)
 
+        if publisher is not None:
+            publisher.close()
+        cleanup_errors = []
+        if camera is not None:
+            try:
+                is_listening = getattr(camera, "is_listening", False)
+                if callable(is_listening):
+                    is_listening = is_listening()
+                if is_listening:
+                    camera.stop()
+            except Exception as error:
+                cleanup_errors.append(
+                    RuntimeError("Could not stop the Movement Preview listener.")
+                )
+                cleanup_errors[-1].__cause__ = error
+            try:
+                if camera.is_alive:
+                    camera.destroy()
+            except Exception as error:
+                cleanup_errors.append(
+                    RuntimeError("Could not destroy the Movement Preview camera.")
+                )
+                cleanup_errors[-1].__cause__ = error
+                self.dashboard_monitor.record_error(error)
+
+        if cleanup_errors:
+            error = RuntimeError(
+                "Movement Preview teardown did not complete; the world "
+                "transition must not continue."
+            )
+            error.__cause__ = cleanup_errors[0]
+            self.dashboard_monitor.record_error(error)
+            if session_id is not None:
+                self.database.movement_event_queue.put((
+                    "movement_camera_teardown_error",
+                    {
+                        "session_id": session_id,
+                        "world_id": world_id,
+                        "world_generation": world_generation,
+                        "message": str(error),
+                    },
+                ))
+            if strict:
+                raise error
+            return False
+
         self.movement_preview_camera = None
         self.movement_preview_publisher = None
         self.movement_preview_session_id = None
@@ -2799,23 +3757,6 @@ class MovementRuntime:
         self.manual_control_command = None
         self.manual_control_received_at = None
         self.manual_control_input_fresh = False
-
-        if publisher is not None:
-            publisher.close()
-        if camera is not None:
-            try:
-                is_listening = getattr(camera, "is_listening", False)
-                if callable(is_listening):
-                    is_listening = is_listening()
-                if is_listening:
-                    camera.stop()
-            except Exception:
-                pass
-            try:
-                if camera.is_alive:
-                    camera.destroy()
-            except Exception as error:
-                self.dashboard_monitor.record_error(error)
 
         if session_id is not None:
             self.database.movement_event_queue.put((
@@ -2835,5 +3776,6 @@ class MovementRuntime:
             preview_world_id=world_id,
             preview_world_generation=world_generation,
         )
+        return True
 
 

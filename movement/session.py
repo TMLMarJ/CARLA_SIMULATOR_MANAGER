@@ -145,7 +145,7 @@ class MovementControlSessionManager:
         )
         return True
 
-    def change_control_mode(self, mode):
+    def change_control_mode(self, mode, basic_agent_settings=None):
         if (
             self.closing
             or self.manager.carla is None
@@ -158,6 +158,7 @@ class MovementControlSessionManager:
             self.session_id,
             self.actor_id,
             mode,
+            basic_agent_settings=basic_agent_settings,
         )
 
     def change_walker_ai_active(self, enabled, speed):
@@ -491,6 +492,14 @@ class MovementControlSessionManager:
                     self.camera_stopped = True
                     self._show_error(data.get("message", "Movement camera error"))
                     self.request_close("Movement camera error")
+                elif status == "movement_camera_teardown_error":
+                    self.camera_stopped = False
+                    self._show_error(
+                        data.get(
+                            "message",
+                            "Movement Preview teardown did not complete.",
+                        )
+                    )
                 elif status == "movement_camera_stopped":
                     self.camera_stopped = True
                     if not self.closing:
@@ -581,6 +590,9 @@ class MovementControlSessionManager:
 
     def is_active(self):
         return self.session_id is not None or self.preview.is_active()
+
+    def is_preview_process_active(self):
+        return self.preview.is_active()
 
     def _finish_close(self):
         if self.window is not None:

@@ -1,5 +1,10 @@
 # Audyt pokrycia funkcjonalnego testów
 
+> Ten dokument jest audytem wykonanym przed końcową stabilizacją BasicAgent.
+> Liczby przypadków opisują tamten snapshot. Aktualny katalog testów live jest
+> utrzymywany w [MANUAL_E2E_CHECKLIST.md](MANUAL_E2E_CHECKLIST.md), a bieżące
+> polecenia testów jednostkowych w [UNIT_TESTS.md](UNIT_TESTS.md).
+
 ## Metoda audytu
 
 Zestawienie powstało przez analizę 33 plików i 316 unikalnych metod testowych. Nie uruchamiano narzędzia do pomiaru pokrycia, dlatego dokument nie podaje procentów. Priorytet opisuje ryzyko regresji, a nie liczbę istniejących testów. Trzy usunięte przypadki sprawdzały wyłącznie zgodność nieistniejących już shimów; końcowa regresja 4B.10 wykonała pozostałe 316 testów z wynikiem `OK`.

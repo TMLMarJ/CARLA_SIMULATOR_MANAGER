@@ -57,7 +57,40 @@ Menedżer utrzymuje jedną aktywną sesję, tworzy okno przez fabrykę przekazan
 
 ### Pojazdy
 
-Kontroler obsługuje No Control, Manual Control, Autopilot oraz nawigację do celu. Sterowanie manualne jest odświeżane w pętli kontrolera z ograniczeniem częstotliwości i timeoutem wejścia. Autopilot korzysta z Traffic Manager na porcie 8000. Nawigacja do celu korzysta z `GlobalRoutePlanner`, sprawdza postęp, dotarcie i utknięcie.
+Kontroler obsługuje No Control, Manual Control, Autopilot — Free Roam oraz
+Autopilot — Destination. Sterowanie manualne jest odświeżane w pętli
+kontrolera z ograniczeniem częstotliwości i timeoutem wejścia. Free Roam
+korzysta z aplikacyjnego Traffic Managera, domyślnie na zarezerwowanym porcie
+`8050`.
+
+Destination korzysta z `GlobalRoutePlanner.trace_route()`. Worker zachowuje
+surowy plan `(carla.Waypoint, RoadOption)[]`, a do GUI publikuje wyłącznie
+serializowane snapshoty i geometrię minimapy. Domyślny executor `basic_agent`:
+
+1. tworzy oficjalny `BasicAgent` z tej samej instalacji CARLA 0.9.16;
+2. przekazuje surowy plan przez `set_global_plan()`;
+3. wyłącza autopilot TM dla tego pojazdu;
+4. wykonuje `run_step()` i `apply_control()` w workerze kontrolera — raz na
+   klatkę sterowaną przez aplikację w trybie sync albo około 20 Hz w async;
+5. pozostawia wspólnemu monitorowi Destination kontrolę postępu, odchylenia,
+   dotarcia i utknięcia.
+
+Executory `path` i `route` są zachowane diagnostycznie i są wybierane wyłącznie
+przez `CARLA_MANAGER_DESTINATION_EXECUTOR`. Nie sterują pojazdem jednocześnie
+z BasicAgent.
+
+W GUI dla BasicAgent dostępne są **Maximum speed** (10–90 km/h, domyślnie
+40 km/h) i **Adaptive speed**. Dane przechodzą ścieżką GUI → session manager →
+kolejka kontrolera → worker. Są przechowywane per actor/runtime, mają
+pierwszeństwo przed fallbackami środowiskowymi i są blokowane na czas aktywnego
+przejazdu. Adaptacja przygotowuje profil z geometrii planu raz przy aktywacji,
+a podczas jazdy zmienia publiczne `agent.set_target_speed()`; nie modyfikuje
+PID ani awaryjnego hamowania BasicAgent.
+
+Zamknięcie Movement Control nie przerywa aktywnego Destination. Ponowne
+otwarcie odtwarza ustawienia i blokadę z aktualnego stanu runtime. Runtime
+kończy zmiana trybu, wynik terminalny, błąd agenta, usunięcie aktora,
+disconnect, Clear World albo zmiana mapy.
 
 ### Piesi
 
@@ -69,7 +102,21 @@ Cel może być wpisany jako XYZ lub wybrany na obrazie mapy OpenDRIVE generowany
 
 Minimapa otrzymuje co około 250 ms lekki snapshot pozycji, yaw, statusu, destination i zaplanowanej trasy przez `movement_event_queue`. Worker jako jedyny odczytuje transform aktora. Obraz bazowy nie jest renderowany ponownie przy aktualizacji pozycji; GUI przesuwa tylko obraz cache i aktualizuje markery oraz linię waypointów trasy. Movement Preview tworzy w CARLA kamerę przypiętą do aktora, lecz proces Pygame otrzymuje tylko ramki i zwraca wejście; nie ma bezpośredniego klienta CARLA.
 
-Zmiana świata, usunięcie aktora, Load/Clear i rozłączenie kończą sesję.
+Zmiana świata, usunięcie aktora, Load/Clear i rozłączenie kończą runtime i
+unieważniają referencje poprzedniego epizodu. Samo zamknięcie okna kończy
+podgląd i sesję GUI, ale zgodnie z kontraktem nie anuluje już uruchomionego
+Destination.
+
+### Ograniczenia Movement Control
+
+- Adaptive Speed jest eksperymentalną heurystyką geometrii 2D. Nie uwzględnia
+  pogody, przyczepności, masy pojazdu ani przechylenia drogi.
+- BasicAgent zachowuje ograniczenia CARLA 0.9.16 w wykrywaniu pieszych i
+  przeszkód statycznych; GUI nie deklaruje pełnej ochrony przed nimi.
+- Executor `route` nie gwarantuje zaplanowanych zmian pasa, a `path` pozostaje
+  mniej niezawodny na części skrętów; oba służą głównie diagnostyce.
+- Aktualny build klienta CARLA nie udostępnia RSS, dlatego aplikacja nie
+  oferuje podglądu ani funkcji RSS.
 
 ## Simulation Control
 

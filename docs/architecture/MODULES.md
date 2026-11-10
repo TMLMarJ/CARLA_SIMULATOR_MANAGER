@@ -18,7 +18,7 @@ Tabela opisuje moduły zawierające logikę produkcyjną po zakończeniu etapu 4
 | `core/registries.py` | `Actors`, `Sensors` | Rejestry żywych referencji CARLA i odpowiadających im modeli. |
 | `models/actors.py` | `ActorInfo`, `SensorInfo` | Mutowalne modele runtime i metadanych ownership/scenario; korzystają z klasyfikatora i `models.scenarios`. |
 | `utilities/functions.py` | funkcje blueprintów, pogody, transformacji i statusów | Wspólne funkcje pomocnicze dla GUI i kontrolera. Importuje CARLA i `ActorOwnership`. |
-| `core/carla_pythonapi.py` | `resolve_carla_pythonapi_path`, `load_global_route_planner` | Odnajduje dodatkowe moduły CARLA PythonAPI i ładuje `GlobalRoutePlanner`. |
+| `core/carla_pythonapi.py` | `resolve_carla_pythonapi_path`, `load_global_route_planner`, `load_basic_agent` | Odnajduje oficjalne moduły CARLA PythonAPI i ładuje `GlobalRoutePlanner` oraz `BasicAgent` z tej samej instalacji. |
 | `services/world.py` | `WorldService` | Retry ładowania mapy i instalacja danych nowego epizodu w istniejącym store. |
 | `services/actors.py` | `ActorService` | Sprawdzony spawn, fizyka, transformacja, usuwanie i cleanup ghost resources. |
 | `services/sensors.py` | `SensorService` | Attach/remove/transform, listen/stop, callback lifecycle, child cleanup i status błędów. |
@@ -53,7 +53,7 @@ Usunięty pakiet `gui_contents/` nie jest już częścią grafu importów; wszys
 | Moduł | Najważniejsze elementy | Odpowiedzialność i zależności |
 |---|---|---|
 | `movement/session.py` | `MovementControlSessionManager` | Jedna aktywna sesja Movement Control, proces podglądu i polling `movement_event_queue`. Otrzymuje fabrykę okna z `Manager` i nie importuje konkretnego widoku. |
-| `movement/runtime.py` | `MovementRuntime` | Kanoniczne handlery vehicle/walker control, destination, AI i cleanup Movement Preview wykonywane na instancji `CarlaController` w jego workerze. |
+| `movement/runtime.py` | `MovementRuntime` | Kanoniczne handlery vehicle/walker control, plan Destination, executory BasicAgent/TM, adaptacyjna prędkość i cleanup Movement Preview wykonywane na instancji `CarlaController` w jego workerze. |
 | `gui/widgets/navigation_map.py` | `NavigationMap`, `NavigationMapViewport` | Współdzielona minimapa compact i mapa interactive; jedna transformacja obraz–canvas, markery aktora/celu, trasa, zoom i pan. |
 | `preview/movement.py` | `ManualControlSmoother`, `LatestFramePublisher`, `MovementPreviewProcess`, `run_movement_preview` | Proces Pygame, kolejki ramek i wejścia, wygładzanie sterowania manualnego. Nie łączy się bezpośrednio z CARLA. |
 | `movement/destination.py` | funkcje walidacji, wyniku i wyboru waypointu | Bezzależnościowa logika punktów docelowych, kandydatów pasów oraz jawnego wyboru waypointu OpenDRIVE. |

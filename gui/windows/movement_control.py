@@ -1,3 +1,4 @@
+import os
 import tkinter as tk
 from tkinter import ttk
 
@@ -22,6 +23,15 @@ from movement.walker import (
 
 
 class MovementControlWindow(tk.Toplevel):
+    BASIC_AGENT_EXECUTOR = "basic_agent"
+    BASIC_AGENT_TARGET_SPEED_ENV = (
+        "CARLA_MANAGER_BASIC_AGENT_TARGET_SPEED"
+    )
+    BASIC_AGENT_ADAPTIVE_SPEED_ENV = (
+        "CARLA_MANAGER_BASIC_AGENT_ADAPTIVE_SPEED"
+    )
+    BASIC_AGENT_DEFAULT_SPEED = 40.0
+
     def __init__(self, parent, actor_id, actor_type, initial_preset,
                  initial_control_state, on_mode_changed,
                  on_walker_ai_changed, on_walker_speed_changed,
@@ -56,10 +66,31 @@ class MovementControlWindow(tk.Toplevel):
         self.navigation_route = initial_control_state.get("route")
         self.navigation_map_data = None
         self.destination_map_window = None
+        self.control_pending = False
+        self.destination_executor = self._destination_executor(
+            initial_control_state
+        )
+        initial_basic_agent_settings = self._initial_basic_agent_settings(
+            initial_control_state
+        )
+        self.basic_agent_maximum_speed_var = tk.StringVar(
+            value=self._format_basic_agent_speed(
+                initial_basic_agent_settings["maximum_speed"]
+            )
+        )
+        self.basic_agent_adaptive_speed_var = tk.BooleanVar(
+            value=initial_basic_agent_settings["adaptive_speed"]
+        )
+        self.basic_agent_settings_locked = bool(
+            initial_control_state.get(
+                "basic_agent_settings_locked",
+                False,
+            )
+        )
 
         self.title("Movement Control")
-        self.geometry("760x780" if not self.is_vehicle else "760x720")
-        self.minsize(700, 690 if not self.is_vehicle else 650)
+        self.geometry("760x780" if not self.is_vehicle else "760x760")
+        self.minsize(700, 690)
         self.resizable(True, True)
         self.configure(bg="#F7E7D3")
         self.grid_columnconfigure(0, weight=1)
@@ -249,6 +280,9 @@ class MovementControlWindow(tk.Toplevel):
         self.walker_speed_button = None
         self.vehicle_start_destination_button = None
         self.vehicle_cancel_destination_button = None
+        self.basic_agent_settings_frame = None
+        self.basic_agent_maximum_speed_spinbox = None
+        self.basic_agent_adaptive_speed_checkbutton = None
 
         if self.is_vehicle:
             ttk.Label(controls_frame, text="Control mode:").grid(
@@ -282,39 +316,70 @@ class MovementControlWindow(tk.Toplevel):
             )
             self.vehicle_cancel_destination_button.pack(side="left")
 
-            ttk.Label(controls_frame, text="Navigation status:").grid(
-                row=2, column=0, sticky="w", padx=(0, 8), pady=4
+            self.basic_agent_settings_frame = ttk.Frame(controls_frame)
+            self.basic_agent_settings_frame.grid(
+                row=2,
+                column=1,
+                sticky="w",
+                pady=4,
             )
             ttk.Label(
-                controls_frame,
-                textvariable=self.vehicle_navigation_status_var,
-            ).grid(row=2, column=1, sticky="w", pady=4)
+                self.basic_agent_settings_frame,
+                text="Maximum speed:",
+            ).pack(side="left", padx=(0, 8))
+            self.basic_agent_maximum_speed_spinbox = ttk.Spinbox(
+                self.basic_agent_settings_frame,
+                from_=10,
+                to=90,
+                increment=5,
+                textvariable=self.basic_agent_maximum_speed_var,
+                width=7,
+            )
+            self.basic_agent_maximum_speed_spinbox.pack(side="left")
+            ttk.Label(
+                self.basic_agent_settings_frame,
+                text="km/h",
+            ).pack(side="left", padx=(5, 18))
+            self.basic_agent_adaptive_speed_checkbutton = ttk.Checkbutton(
+                self.basic_agent_settings_frame,
+                text="Adaptive speed",
+                variable=self.basic_agent_adaptive_speed_var,
+            )
+            self.basic_agent_adaptive_speed_checkbutton.pack(side="left")
 
-            ttk.Label(controls_frame, text="Distance to destination:").grid(
+            ttk.Label(controls_frame, text="Navigation status:").grid(
                 row=3, column=0, sticky="w", padx=(0, 8), pady=4
             )
             ttk.Label(
                 controls_frame,
-                textvariable=self.vehicle_distance_var,
+                textvariable=self.vehicle_navigation_status_var,
             ).grid(row=3, column=1, sticky="w", pady=4)
 
-            ttk.Label(controls_frame, text="Current speed:").grid(
+            ttk.Label(controls_frame, text="Distance to destination:").grid(
                 row=4, column=0, sticky="w", padx=(0, 8), pady=4
             )
             ttk.Label(
                 controls_frame,
-                textvariable=self.vehicle_speed_var,
+                textvariable=self.vehicle_distance_var,
             ).grid(row=4, column=1, sticky="w", pady=4)
 
-            ttk.Label(controls_frame, text="Current state:").grid(
+            ttk.Label(controls_frame, text="Current speed:").grid(
                 row=5, column=0, sticky="w", padx=(0, 8), pady=4
+            )
+            ttk.Label(
+                controls_frame,
+                textvariable=self.vehicle_speed_var,
+            ).grid(row=5, column=1, sticky="w", pady=4)
+
+            ttk.Label(controls_frame, text="Current state:").grid(
+                row=6, column=0, sticky="w", padx=(0, 8), pady=4
             )
             ttk.Label(
                 controls_frame,
                 textvariable=self.control_state_var,
                 wraplength=310,
-            ).grid(row=5, column=1, sticky="w", pady=4)
-            preview_row = 6
+            ).grid(row=6, column=1, sticky="w", pady=4)
+            preview_row = 7
         else:
             ttk.Label(controls_frame, text="Control mode:").grid(
                 row=0, column=0, sticky="nw", padx=(0, 8), pady=4
@@ -465,8 +530,145 @@ class MovementControlWindow(tk.Toplevel):
         self.protocol("WM_DELETE_WINDOW", self._request_close)
         self.bind("<Destroy>", self._on_destroy, add="+")
         self.set_destination_state(initial_destination)
-        if not self.is_vehicle:
+        if self.is_vehicle:
+            self._apply_basic_agent_settings_state(initial_control_state)
+        else:
             self.set_walker_ai_state(initial_control_state)
+
+    @classmethod
+    def _destination_executor(cls, control_state):
+        executor = control_state.get("destination_executor")
+        route = control_state.get("route")
+        if not executor and isinstance(route, dict):
+            executor = route.get("executor")
+        if not executor:
+            executor = str(os.environ.get(
+                "CARLA_MANAGER_DESTINATION_EXECUTOR",
+                "basic_agent",
+            )).strip().casefold() or "basic_agent"
+        return str(executor).strip().casefold()
+
+    @classmethod
+    def _environment_basic_agent_settings(cls):
+        raw_speed = str(os.environ.get(
+            cls.BASIC_AGENT_TARGET_SPEED_ENV,
+            "",
+        )).strip()
+        try:
+            maximum_speed = (
+                float(raw_speed)
+                if raw_speed else cls.BASIC_AGENT_DEFAULT_SPEED
+            )
+        except (TypeError, ValueError):
+            maximum_speed = cls.BASIC_AGENT_DEFAULT_SPEED
+        if not 10.0 <= maximum_speed <= 90.0:
+            maximum_speed = cls.BASIC_AGENT_DEFAULT_SPEED
+
+        raw_adaptive = str(os.environ.get(
+            cls.BASIC_AGENT_ADAPTIVE_SPEED_ENV,
+            "1",
+        )).strip().casefold()
+        adaptive_speed = raw_adaptive not in {
+            "0", "false", "no", "off",
+        }
+        return {
+            "maximum_speed": maximum_speed,
+            "adaptive_speed": adaptive_speed,
+        }
+
+    @classmethod
+    def _initial_basic_agent_settings(cls, control_state):
+        settings = control_state.get("basic_agent_settings")
+        if not isinstance(settings, dict):
+            return cls._environment_basic_agent_settings()
+        defaults = cls._environment_basic_agent_settings()
+        try:
+            maximum_speed = float(settings.get(
+                "maximum_speed",
+                defaults["maximum_speed"],
+            ))
+        except (TypeError, ValueError):
+            maximum_speed = defaults["maximum_speed"]
+        if not 10.0 <= maximum_speed <= 90.0:
+            maximum_speed = defaults["maximum_speed"]
+        adaptive_speed = settings.get(
+            "adaptive_speed",
+            defaults["adaptive_speed"],
+        )
+        if not isinstance(adaptive_speed, bool):
+            adaptive_speed = defaults["adaptive_speed"]
+        return {
+            "maximum_speed": maximum_speed,
+            "adaptive_speed": adaptive_speed,
+        }
+
+    @staticmethod
+    def _format_basic_agent_speed(speed):
+        speed = float(speed)
+        return str(int(speed)) if speed.is_integer() else f"{speed:g}"
+
+    def _basic_agent_settings_from_controls(self):
+        if self.destination_executor != self.BASIC_AGENT_EXECUTOR:
+            return None
+        try:
+            maximum_speed = float(
+                self.basic_agent_maximum_speed_var.get()
+            )
+        except (TypeError, ValueError, tk.TclError):
+            self.control_state_var.set(
+                "Maximum speed must be a number from 10 to 90 km/h."
+            )
+            return False
+        if not 10.0 <= maximum_speed <= 90.0:
+            self.control_state_var.set(
+                "Maximum speed must be between 10 and 90 km/h."
+            )
+            return False
+        return {
+            "maximum_speed": maximum_speed,
+            "adaptive_speed": bool(
+                self.basic_agent_adaptive_speed_var.get()
+            ),
+        }
+
+    def _refresh_basic_agent_settings_controls(self):
+        if self.basic_agent_settings_frame is None:
+            return
+        visible = self.destination_executor == self.BASIC_AGENT_EXECUTOR
+        if visible:
+            self.basic_agent_settings_frame.grid()
+        else:
+            self.basic_agent_settings_frame.grid_remove()
+        state = (
+            "disabled"
+            if (
+                not visible
+                or self.basic_agent_settings_locked
+                or self.control_pending
+                or self.closed
+            )
+            else "normal"
+        )
+        self.basic_agent_maximum_speed_spinbox.configure(state=state)
+        self.basic_agent_adaptive_speed_checkbutton.configure(state=state)
+
+    def _apply_basic_agent_settings_state(self, control_state):
+        self.destination_executor = self._destination_executor(control_state)
+        settings = control_state.get("basic_agent_settings")
+        if isinstance(settings, dict):
+            normalized = self._initial_basic_agent_settings(control_state)
+            self.basic_agent_maximum_speed_var.set(
+                self._format_basic_agent_speed(
+                    normalized["maximum_speed"]
+                )
+            )
+            self.basic_agent_adaptive_speed_var.set(
+                normalized["adaptive_speed"]
+            )
+        self.basic_agent_settings_locked = bool(
+            control_state.get("basic_agent_settings_locked", False)
+        )
+        self._refresh_basic_agent_settings_controls()
 
     @staticmethod
     def _location_point(location):
@@ -685,8 +887,17 @@ class MovementControlWindow(tk.Toplevel):
         self.on_mode_changed(mode)
 
     def _start_vehicle_destination(self):
+        basic_agent_settings = self._basic_agent_settings_from_controls()
+        if basic_agent_settings is False:
+            return
         self.control_mode_var.set(AUTOPILOT_DESTINATION)
-        self.on_mode_changed(AUTOPILOT_DESTINATION)
+        if basic_agent_settings is None:
+            self.on_mode_changed(AUTOPILOT_DESTINATION)
+        else:
+            self.on_mode_changed(
+                AUTOPILOT_DESTINATION,
+                basic_agent_settings,
+            )
 
     def _cancel_vehicle_destination(self):
         self.control_mode_var.set(NO_CONTROL)
@@ -762,6 +973,7 @@ class MovementControlWindow(tk.Toplevel):
     def set_control_state(self, control_state):
         if self.closed or not self.is_vehicle:
             return
+        self.control_pending = False
         mode = control_state.get("mode", NO_CONTROL)
         if mode in VEHICLE_CONTROL_MODES:
             self.control_mode_var.set(mode)
@@ -796,6 +1008,7 @@ class MovementControlWindow(tk.Toplevel):
         self.control_mode.configure(state="readonly")
         self.vehicle_start_destination_button.configure(state="normal")
         self.vehicle_cancel_destination_button.configure(state="normal")
+        self._apply_basic_agent_settings_state(control_state)
 
     def set_walker_ai_state(self, state, error=False):
         if self.closed or self.is_vehicle:
@@ -849,10 +1062,12 @@ class MovementControlWindow(tk.Toplevel):
     def set_control_pending(self, state):
         if self.closed:
             return
+        self.control_pending = True
         self.control_state_var.set(state)
         self.control_mode.configure(state="disabled")
         self.vehicle_start_destination_button.configure(state="disabled")
         self.vehicle_cancel_destination_button.configure(state="disabled")
+        self._refresh_basic_agent_settings_controls()
 
     def set_walker_pending(self, state):
         if self.closed or self.is_vehicle:
@@ -870,11 +1085,14 @@ class MovementControlWindow(tk.Toplevel):
     def set_closing(self, state):
         if self.closed:
             return
+        self.control_pending = True
+        self.basic_agent_settings_locked = False
         self.preview_state_var.set(state)
         if self.control_mode is not None:
             self.control_mode.configure(state="disabled")
             self.vehicle_start_destination_button.configure(state="disabled")
             self.vehicle_cancel_destination_button.configure(state="disabled")
+            self._refresh_basic_agent_settings_controls()
         if self.walker_toggle_button is not None:
             self.walker_toggle_button.configure(state="disabled")
             self.walker_speed_spinbox.configure(state="disabled")

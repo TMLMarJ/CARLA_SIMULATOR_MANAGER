@@ -2,6 +2,11 @@
 
 Dokumentacja użytkowa: [README](../README.md) oraz [instalacja](../INSTALLATION.md).
 
+Te dwa pliki oraz dokumenty wymienione poniżej są źródłem prawdy o aktualnym
+kodzie. Raporty etapowe w katalogu głównym (np. `BASIC_AGENT_STAGE*.md` i
+`VEHICLE_DESTINATION_STAGE*.md`) zachowują historię implementacji, ale mogą
+opisywać wcześniejsze wartości domyślne i nie są instrukcją uruchomieniową.
+
 ## Aktualna dokumentacja architektury
 
 Poniższe dokumenty opisują bieżący kod źródłowy:
@@ -12,7 +17,7 @@ Poniższe dokumenty opisują bieżący kod źródłowy:
 - [Komunikacja z CARLA](architecture/CARLA_COMMUNICATION.md) — połączenie, polecenia, wątki, procesy, synchronizacja i błędy.
 - [Przepływ danych](architecture/DATA_FLOW.md) — źródła prawdy, `DataStorage` oraz zapis i odczyt scenariuszy.
 - [Architektura funkcjonalności](architecture/FEATURES.md) — GUI, aktorzy, sensory, ruch, symulacja, scenariusze i podglądy.
-- [Plan i historia refaktoryzacji](architecture/legacy/REFACTOR_PLAN.md) — mapa migracji, ryzyka i zrealizowane etapy 4B.1–4B.9.
+- [Plan i historia refaktoryzacji](architecture/legacy/REFACTOR_PLAN.md) — archiwalna mapa migracji i zrealizowanych etapów.
 
 Historyczne dokumenty projektowe są zachowane w [archiwum decyzji](architecture/legacy/README.md). Mogą zawierać uzasadnienia wcześniejszych decyzji, lecz nie są źródłem prawdy o aktualnej implementacji.
 
@@ -26,6 +31,7 @@ Historyczne dokumenty projektowe są zachowane w [archiwum decyzji](architecture
 
 - [Organizacja i uruchamianie testów jednostkowych](testing/UNIT_TESTS.md)
 - [Audyt pokrycia funkcjonalnego](testing/TEST_COVERAGE.md)
+- [Manualna checklista E2E](testing/MANUAL_E2E_CHECKLIST.md)
 - [Katalog testów](../tests/)
 
 Workflow projektu pozostaje w [WORKFLOW.md](../WORKFLOW.md).

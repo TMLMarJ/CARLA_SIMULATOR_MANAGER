@@ -141,26 +141,13 @@ Dwa testy ruchu używają setupu z `WalkerControlTests`. Importują teraz moduł
 7. Nie używaj `sleep`; wstrzykuj zegar albo ustawiaj stan czasu jawnie.
 8. Po dodaniu testu uruchom najpierw pojedynczy moduł, potem obszar, a pełny zestaw tylko przed zakończeniem zmiany.
 
-## Końcowa checklista manualna z CARLA
+## Końcowe testy manualne z CARLA
 
-Poniższych punktów nie zalicza pełna regresja z fake'ami. Wymagają uruchomionego serwera CARLA i pulpitu Windows:
-
-- [ ] uruchomienie `python app.py` oraz zamknięcie bez pozostawionych procesów;
-- [ ] Connect → Disconnect → Reconnect do bieżącego epizodu;
-- [ ] Change World oraz odświeżenie mapy, aktorów, sensorów i dashboardu;
-- [ ] World & Weather, w tym zastosowanie pogody;
-- [ ] Spawn/Edit/Delete dla Vehicle, Pedestrian i Static Object;
-- [ ] Ghost Preview: włączenie, aktualizacja i cleanup przy zmianie zakładki/mapy;
-- [ ] attach, podgląd i usunięcie sensorów; zamknięcie Sensor Preview;
-- [ ] Movement Control: otwarcie, ponowne otwarcie i zamknięcie bez zatrzymania aktywnego ruchu;
-- [ ] Vehicle Autopilot oraz Vehicle Destination;
-- [ ] Walker Manual/AI oraz Walker Destination;
-- [ ] Simulation Sync/Async, Tick, Pause/Resume i Single Step;
-- [ ] aktualizacja Dashboardu dla managed/external actors;
-- [ ] Scenario Save, preflight Load, Load, Clear Managed Only i Clear Entire World;
-- [ ] World Synchronization oraz Take Ownership bez respawnu;
-- [ ] Spectator Preview: start, sterowanie i cleanup procesu;
-- [ ] rozłączenie, zmiana mapy i zamknięcie aplikacji podczas aktywnych podglądów.
+Aktualny, niepowielany katalog testów live znajduje się w
+[MANUAL_E2E_CHECKLIST.md](MANUAL_E2E_CHECKLIST.md). Obejmuje BasicAgent,
+Maximum/Adaptive speed, lifecycle mapy, przejścia trybów, reconnect,
+managed/external actors, Scenario Save/Load i współpracę wielu klientów.
+Testy jednostkowe z fake'ami nie zaliczają tych przypadków.
 
 ## Znane ograniczenia organizacji
 

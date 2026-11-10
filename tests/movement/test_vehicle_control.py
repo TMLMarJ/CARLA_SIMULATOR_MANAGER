@@ -31,9 +31,25 @@ class FakeVehicle:
 class FakeTrafficManager:
     def __init__(self):
         self.sync_modes = []
+        self.paths = []
+        self.auto_lane_changes = []
+        self.random_left_lane_changes = []
+        self.random_right_lane_changes = []
 
     def set_synchronous_mode(self, enabled):
         self.sync_modes.append(enabled)
+
+    def set_path(self, actor, path, empty_buffer=True):
+        self.paths.append((actor.id, list(path), empty_buffer))
+
+    def auto_lane_change(self, actor, enabled):
+        self.auto_lane_changes.append((actor.id, bool(enabled)))
+
+    def random_left_lanechange_percentage(self, actor, percentage):
+        self.random_left_lane_changes.append((actor.id, percentage))
+
+    def random_right_lanechange_percentage(self, actor, percentage):
+        self.random_right_lane_changes.append((actor.id, percentage))
 
 
 class FakeWorld:
@@ -127,6 +143,9 @@ class VehicleControlTests(unittest.TestCase):
         self.assertEqual(AUTOPILOT_FREE_ROAM, state["mode"])
         self.assertEqual([(True, 8000)], self.vehicle.autopilot_calls)
         self.assertEqual([True], self.traffic_manager.sync_modes)
+        self.assertEqual([(7, True)], self.traffic_manager.auto_lane_changes)
+        self.assertEqual([(7, 0)], self.traffic_manager.random_left_lane_changes)
+        self.assertEqual([(7, 0)], self.traffic_manager.random_right_lane_changes)
 
         self.change_mode(MANUAL_CONTROL)
         self.assertEqual((False, 8000), self.vehicle.autopilot_calls[-1])

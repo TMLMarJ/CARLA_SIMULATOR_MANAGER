@@ -5,3 +5,6 @@ tester_function.ipynb
 /docs/implementation/
 /docs/architecture/legacy
 /docs/thesis/
+
+__pycache__/
+*.py[cod]

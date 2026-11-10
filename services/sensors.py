@@ -170,21 +170,29 @@ class SensorService:
             self._record_error(error_message)
             preview_buffer.set_error(error_message)
 
-    def stop_preview_actor(self, sensor_id):
+    def stop_preview_actor(self, sensor_id, strict=False):
         if sensor_id not in self.preview_ids:
-            return
+            return True
         sensor = self.database.sensors_db.sensors.get(sensor_id)
         if sensor is not None:
             try:
                 if sensor.is_alive and sensor.is_listening():
                     sensor.stop()
             except Exception as error:
+                if strict:
+                    raise RuntimeError(
+                        f"Could not stop sensor preview {sensor_id}."
+                    ) from error
                 print(f"Error stopping sensor preview {sensor_id}: {error}")
+                self.preview_ids.discard(sensor_id)
+                return False
         self.preview_ids.discard(sensor_id)
+        return True
 
-    def cleanup_previews(self):
+    def cleanup_previews(self, strict=False):
         for sensor_id in list(self.preview_ids):
-            self.stop_preview_actor(sensor_id)
+            self.stop_preview_actor(sensor_id, strict=strict)
+        return True
 
     def remove_for_parent(self, parent_id):
         sensor_ids = [

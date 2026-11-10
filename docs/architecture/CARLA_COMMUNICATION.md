@@ -25,23 +25,22 @@ Błąd dowolnego z tych kroków publikuje `("connection_error", message)`. Timeo
 
 Po zmianie świata kontroler zastępuje referencje, czyści nieaktualne rejestry runtime i ponownie pobiera dane. Po rozłączeniu `Manager` tworzy całkowicie nowy `DataStorage`.
 
-Referencja `CarlaController.traffic_manager` jest lokalnym proxy do TM na porcie
-`8000`, a nie prywatnym magazynem stanu aplikacji. Przed zmianą epizodu
-aplikacja czyści ścieżki i wyłącza autopilot wyłącznie dla pojazdów MANAGED.
-Przed `load_world()` odrzuca stare proxy. Nie wywołuje API TM bezpośrednio po
-zmianie epizodu; proxy jest pobierane leniwie przy pierwszej aktywacji
-autopilota w nowym świecie, a wtedy tryb synchroniczny jest uzgadniany z jego
-ustawieniami. Nie wykonuje globalnego resetu TM, ponieważ port może być
-współdzielony z innymi klientami.
+Referencja `CarlaController.traffic_manager` jest lokalnym proxy do TM, a nie
+prywatnym magazynem stanu aplikacji. Bez zmiennych środowiskowych aplikacja
+używa dedykowanego portu `8050` i kontraktu exclusive. Przed zmianą epizodu
+czyści sterowanie pojazdów MANAGED, zatrzymuje należący do niej TM przez
+`shut_down()`, a dopiero potem wykonuje `load_world()`. Proxy nowego epizodu
+jest pobierane leniwie przy pierwszej aktywacji Free Roam albo executora TM.
+Otrzymuje wtedy aktualny tryb synchronizacji i nie zachowuje lokalnych tras ani
+identyfikatorów aktorów poprzedniego świata.
 
 W CARLA 0.9.16 samo odrzucenie Pythonowego proxy nie usuwa instancji TM.
 Biblioteka `libcarla` przechowuje procesową statyczną mapę instancji według
-portu. Dlatego nowy `CarlaController`, nowy `carla.Client` oraz reconnect w tym
-samym procesie mogą ponownie trafić na wpis portu `8000` utworzony dla
-poprzedniego epizodu. Dopiero zakończenie procesu albo `TrafficManager.shut_down()`
-usuwa ten wpis. Aplikacja nie wywołuje `shut_down()` automatycznie, ponieważ
-Python API nie ujawnia, czy bieżący proces jest właścicielem lokalnego serwera
-TM; dla zdalnego proxy ta operacja zatrzymałaby współdzielony serwer TM.
+portu. Dlatego samo porzucenie wrappera Pythona nie wystarcza przy zmianie
+mapy. Aplikacja wywołuje `shut_down()` wyłącznie dla proxy, dla którego przed
+utworzeniem ustanowiła lokalny kontrakt exclusive na zarezerwowanym porcie.
+Nie zatrzymuje TM o nieznanej własności ani instancji współdzielonej z innymi
+klientami.
 
 Ograniczoną diagnostykę lifecycle włącza zmienna
 `CARLA_MANAGER_TM_DEBUG=1`. Log powstaje wyłącznie w workerze podczas Connect,
@@ -57,13 +56,13 @@ albo ponownej inicjalizacji TM.
 
 ### Tryb shared i exclusive Traffic Managera
 
-Domyślnie aplikacja używa portu `8000` w trybie shared. Port można zmienić
-przez `CARLA_MANAGER_TM_PORT`, ale dopóki
-`CARLA_MANAGER_TM_EXCLUSIVE` nie ma wartości `1`, `true`, `yes` lub `on`,
-aplikacja nigdy nie wywołuje `TrafficManager.shut_down()`.
+Domyślnie aplikacja używa portu `8050` w trybie exclusive. Port można zmienić
+przez `CARLA_MANAGER_TM_PORT`. `CARLA_MANAGER_TM_EXCLUSIVE=0` jawnie wybiera
+tryb shared; aplikacja nie wywołuje wtedy `TrafficManager.shut_down()` ani nie
+nadpisuje trybu synchronizacji współdzielonego TM.
 
-Tryb exclusive wymaga jawnie ustawionego portu innego niż `8000`. Przed
-utworzeniem TM aplikacja sprawdza, czy port loopback jest wolny i czy inny
+Tryb exclusive wymaga portu innego niż współdzielony standardowy port `8000`.
+Przed utworzeniem TM aplikacja sprawdza, czy port loopback jest wolny i czy inny
 `CarlaController` w tym samym procesie nie posiada już kontraktu dla tego
 portu. Zajęty port przerywa inicjalizację; aplikacja nie dołącza do nieznanego
 TM i nie próbuje go zatrzymać. Po utworzeniu proxy zapisywany jest lokalny
@@ -78,10 +77,13 @@ Flaga exclusive jest potwierdzeniem tego kontraktu, a nie mechanizmem
 rezerwacji portu wobec obcych klientów.
 
 W trybie exclusive kolejność przejścia epizodu to: blokada komend Movement,
-wyłączenie autopilota MANAGED actors, cleanup Movement/Walker/Preview,
-`TrafficManager.shut_down()`, odrzucenie proxy, `load_world()` i leniwa
-inicjalizacja nowego TM. Błąd własności lub shutdown przerywa zmianę świata
-przed `load_world()`.
+wyłączenie autopilota MANAGED actors, cleanup Movement/Walker/Preview i
+sensorów, `TrafficManager.shut_down()`, odrzucenie proxy, `load_world()` oraz
+leniwa inicjalizacja nowego TM. Błąd własności lub teardownu przerywa zmianę
+świata przed `load_world()`. W trybie shared aktywny TM również powoduje
+kontrolowane anulowanie zmiany świata, ponieważ aplikacja nie może ani
+bezpiecznie zatrzymać obcej instancji, ani pozostawić jej wątków przy zmianie
+epizodu.
 
 ## Polecenia GUI
 

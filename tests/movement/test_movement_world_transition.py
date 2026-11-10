@@ -8,6 +8,7 @@ from core.controller import CarlaController
 from gui.tabs.world import CustomWorldAndWeatherFrame
 from movement.destination import confirm_destination, destination_result
 from movement.session import MovementControlSessionManager
+from preview.movement import LatestFramePublisher
 from movement.vehicle import (
     AUTOPILOT_DESTINATION,
     AUTOPILOT_FREE_ROAM,
@@ -428,7 +429,8 @@ class WorkerWorldChangeCleanupTests(unittest.TestCase):
                 )
                 self.assertNotEqual(main_thread, worker_thread)
                 controller.cleanup_movement_preview.assert_called_once_with(
-                    "world_changed"
+                    "world_changed",
+                    strict=True,
                 )
 
     def test_tm_debug_brackets_cleanup_and_load_world_rpc(self):
@@ -508,11 +510,71 @@ class WorkerWorldChangeCleanupTests(unittest.TestCase):
             controller.database.world_change_error,
         )
 
+    def test_active_shared_tm_cancels_load_world_without_global_shutdown(self):
+        controller, context, _vehicle, _walker = self.make_controller(
+            vehicle_mode=AUTOPILOT_FREE_ROAM,
+        )
+        shared_tm = SimpleNamespace(shut_down=Mock())
+        controller.traffic_manager_exclusive = False
+        controller.traffic_manager = shared_tm
+
+        self.run_change_in_worker(controller, context)
+
+        controller.world_service.load_with_retry.assert_not_called()
+        shared_tm.shut_down.assert_not_called()
+        self.assertTrue(controller.world_changed_event.is_set())
+        self.assertFalse(controller.world_transition_event.is_set())
+        self.assertIn(
+            "shared Traffic Manager",
+            controller.database.world_change_error,
+        )
+
+    def test_movement_teardown_failure_cancels_load_world(self):
+        controller, context, _vehicle, _walker = self.make_controller(
+            vehicle_mode=AUTOPILOT_DESTINATION,
+        )
+        controller.cleanup_movement_preview.side_effect = RuntimeError(
+            "movement preview teardown failed"
+        )
+
+        self.run_change_in_worker(controller, context)
+
+        controller.world_service.load_with_retry.assert_not_called()
+        self.assertTrue(controller.world_changed_event.is_set())
+        self.assertFalse(controller.world_transition_event.is_set())
+        self.assertFalse(controller.database.world_changed)
+        self.assertIn(
+            "movement preview teardown failed",
+            controller.database.world_change_error,
+        )
+
+    def test_vehicle_control_teardown_failure_cancels_load_world(self):
+        controller, context, vehicle, _walker = self.make_controller(
+            vehicle_mode=AUTOPILOT_DESTINATION,
+        )
+        vehicle.set_autopilot = Mock(
+            side_effect=RuntimeError("old episode rejected autopilot RPC")
+        )
+
+        self.run_change_in_worker(controller, context)
+
+        controller.world_service.load_with_retry.assert_not_called()
+        self.assertTrue(controller.world_changed_event.is_set())
+        self.assertFalse(controller.world_transition_event.is_set())
+        self.assertIn(
+            "Could not disable autopilot",
+            controller.database.world_change_error,
+        )
+
     def test_change_world_drops_local_tm_and_navigation_runtime(self):
         controller, context, _vehicle, _walker = self.make_controller(
             vehicle_mode=AUTOPILOT_DESTINATION,
         )
-        old_tm = object()
+        old_tm = SimpleNamespace(shut_down=Mock())
+        controller.TRAFFIC_MANAGER_PORT = 8051
+        controller.traffic_manager_exclusive = True
+        controller.traffic_manager_exclusive_owned = True
+        controller.traffic_manager_owner_controller_id = id(controller)
         controller.traffic_manager = old_tm
         controller.vehicle_navigation_runtime[7] = {"world_id": 1}
         controller.vehicle_navigation_submission_counts[7] = 2
@@ -527,6 +589,7 @@ class WorkerWorldChangeCleanupTests(unittest.TestCase):
         self.assertEqual({}, controller.vehicle_navigation_submission_counts)
         self.assertEqual(0, controller.vehicle_navigation_submission_sequence)
         self.assertIsNone(controller.movement_navigation_map_cache)
+        old_tm.shut_down.assert_called_once_with()
 
     def test_no_old_actor_or_tm_rpc_runs_after_load_world(self):
         controller, context, vehicle, _walker = self.make_controller(
@@ -548,10 +611,16 @@ class WorkerWorldChangeCleanupTests(unittest.TestCase):
                     raise AssertionError("old actor RPC after load_world")
 
         controller.database.actors_db.actors[vehicle.id] = GuardedVehicle()
-        controller.traffic_manager = object()
+        controller.TRAFFIC_MANAGER_PORT = 8051
+        controller.traffic_manager_exclusive = True
+        controller.traffic_manager_exclusive_owned = True
+        controller.traffic_manager_owner_controller_id = id(controller)
+        controller.traffic_manager = SimpleNamespace(shut_down=Mock())
         new_world = controller.world_service.load_with_retry.return_value
 
         def load_world(*_args):
+            self.assertEqual({}, controller.database.actors_db.actors)
+            self.assertEqual({}, controller.database.vehicle_control_states)
             episode["loaded"] = True
             return new_world
 
@@ -614,6 +683,40 @@ class WorkerWorldChangeCleanupTests(unittest.TestCase):
         self.assertIsNone(controller.movement_preview_camera)
         self.assertTrue(episode["loaded"])
 
+    def test_closed_movement_publisher_ignores_stale_camera_callback(self):
+        controller, _context, _vehicle, _walker = self.make_controller()
+        frame_queue = queue.Queue(maxsize=1)
+        publisher = LatestFramePublisher(frame_queue)
+        camera = SimpleNamespace(
+            id=90,
+            is_listening=True,
+            is_alive=True,
+            stop=Mock(),
+            destroy=Mock(),
+        )
+        controller.cleanup_movement_preview = (
+            CarlaController.cleanup_movement_preview.__get__(controller)
+        )
+        controller.movement_preview_camera = camera
+        controller.movement_preview_publisher = publisher
+        controller.movement_preview_session_id = "session"
+        controller.movement_preview_actor_id = 7
+        controller.movement_preview_world_id = 1
+        controller.movement_preview_world_generation = 1
+        controller.movement_control_queue = queue.Queue()
+
+        controller.cleanup_movement_preview("world_changed", strict=True)
+        publisher.publish(SimpleNamespace(
+            raw_data=b"stale",
+            width=1,
+            height=1,
+            frame=1,
+        ))
+
+        self.assertTrue(frame_queue.empty())
+        camera.stop.assert_called_once_with()
+        camera.destroy.assert_called_once_with()
+
     def test_stale_stop_preview_command_is_rejected(self):
         controller, _context, _vehicle, _walker = self.make_controller()
         controller.database.world_id = 2
@@ -650,6 +753,34 @@ class WorkerWorldChangeCleanupTests(unittest.TestCase):
 
 
 class WorldChangeGuiBoundaryTests(unittest.TestCase):
+    def test_world_change_waits_for_movement_preview_process(self):
+        manager = SimpleNamespace(
+            connected=True,
+            disconnecting=False,
+            closing=False,
+            spectator_preview=SimpleNamespace(is_active=lambda: False),
+            movement_control=SimpleNamespace(
+                is_preview_process_active=lambda: True,
+            ),
+        )
+        frame = SimpleNamespace(
+            world_change_check=object(),
+            controller=SimpleNamespace(manager=manager),
+            winfo_exists=lambda: True,
+            after=Mock(return_value="after-id"),
+            _wait_for_spectator_close=Mock(),
+            _finish_world_change=Mock(),
+            _apply_world_after_spectator_close=Mock(),
+        )
+
+        CustomWorldAndWeatherFrame._wait_for_spectator_close(frame)
+
+        frame.after.assert_called_once_with(
+            100,
+            frame._wait_for_spectator_close,
+        )
+        frame._apply_world_after_spectator_close.assert_not_called()
+
     def test_weather_refresh_uses_worker_cached_data_not_world_rpc(self):
         weather = {
             "cloudiness": 1.0,

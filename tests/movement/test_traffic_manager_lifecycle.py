@@ -72,7 +72,10 @@ class TrafficManagerLifecycleTests(unittest.TestCase):
         movement_runtime_module._TM_EXCLUSIVE_OWNERS.clear()
 
     def test_shared_tm_never_shuts_down(self):
-        controller = CarlaController(DataStorage())
+        with patch.dict(os.environ, {
+            "CARLA_MANAGER_TM_EXCLUSIVE": "0",
+        }, clear=True):
+            controller = CarlaController(DataStorage())
         traffic_manager = FakeTrafficManager()
         controller.traffic_manager = traffic_manager
 
@@ -84,6 +87,50 @@ class TrafficManagerLifecycleTests(unittest.TestCase):
         self.assertFalse(result)
         self.assertEqual(0, traffic_manager.shutdown_calls)
         self.assertIs(traffic_manager, controller.traffic_manager)
+
+    def test_default_tm_uses_application_owned_dedicated_port(self):
+        with patch.dict(os.environ, {}, clear=True):
+            controller = CarlaController(DataStorage())
+
+        self.assertTrue(controller.traffic_manager_exclusive)
+        self.assertEqual(
+            controller.APPLICATION_TRAFFIC_MANAGER_PORT,
+            controller.TRAFFIC_MANAGER_PORT,
+        )
+
+    def test_active_shared_tm_blocks_world_change_without_shutdown(self):
+        with patch.dict(os.environ, {
+            "CARLA_MANAGER_TM_EXCLUSIVE": "0",
+        }, clear=True):
+            controller = CarlaController(DataStorage())
+        traffic_manager = FakeTrafficManager()
+        controller.traffic_manager = traffic_manager
+
+        with self.assertRaisesRegex(RuntimeError, "shared Traffic Manager"):
+            controller._prepare_traffic_manager_for_world_change()
+
+        self.assertEqual(0, traffic_manager.shutdown_calls)
+        self.assertIs(traffic_manager, controller.traffic_manager)
+
+    def test_shared_tm_sync_mode_is_not_changed_by_this_client(self):
+        with patch.dict(os.environ, {
+            "CARLA_MANAGER_TM_EXCLUSIVE": "0",
+        }, clear=True):
+            controller = CarlaController(DataStorage())
+        traffic_manager = FakeTrafficManager()
+        controller.client = SimpleNamespace(
+            get_trafficmanager=Mock(return_value=traffic_manager),
+        )
+        world = SimpleNamespace(
+            id=15,
+            get_settings=lambda: SimpleNamespace(synchronous_mode=True),
+        )
+
+        controller._ensure_traffic_manager(world)
+
+        self.assertEqual([], traffic_manager.sync_modes)
+        self.assertIsNone(controller.traffic_manager_last_sync)
+        self.assertEqual(15, controller.traffic_manager_world_id)
 
     def test_exclusive_requires_non_default_reserved_port(self):
         with patch.dict(os.environ, {

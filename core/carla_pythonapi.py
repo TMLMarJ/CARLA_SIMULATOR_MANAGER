@@ -107,3 +107,58 @@ def load_global_route_planner():
             "restart it."
         )
     return planner, None
+
+
+def load_basic_agent():
+    """Configure the local PythonAPI path, then import CARLA's BasicAgent."""
+    configured, _source = _configured_root()
+    pythonapi_path, error = resolve_carla_pythonapi_path()
+    if pythonapi_path is None:
+        if configured is None:
+            try:
+                module = importlib.import_module(
+                    "agents.navigation.basic_agent"
+                )
+                return getattr(module, "BasicAgent"), None
+            except (AttributeError, ImportError, OSError):
+                pass
+        return None, error
+
+    agent_file = (
+        pythonapi_path
+        / "agents"
+        / "navigation"
+        / "basic_agent.py"
+    )
+    if not agent_file.is_file():
+        return None, (
+            "CARLA BasicAgent is unavailable. The configured CARLA 0.9.16 "
+            f"PythonAPI directory '{pythonapi_path}' does not contain "
+            "agents/navigation/basic_agent.py."
+        )
+
+    path_text = str(pythonapi_path)
+    if path_text not in sys.path:
+        sys.path.insert(0, path_text)
+    importlib.invalidate_caches()
+    try:
+        module = importlib.import_module("agents.navigation.basic_agent")
+        basic_agent = getattr(module, "BasicAgent")
+    except (AttributeError, ImportError, OSError) as import_error:
+        return None, (
+            "CARLA BasicAgent could not be imported from "
+            f"'{pythonapi_path}': {import_error}. Verify that the configured "
+            "PythonAPI belongs to CARLA 0.9.16 and restart the application."
+        )
+    module_file = getattr(module, "__file__", None)
+    try:
+        Path(module_file).resolve().relative_to(pythonapi_path)
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None, (
+            "A different 'agents.navigation.basic_agent' module is already "
+            "loaded outside the configured CARLA PythonAPI directory. Remove "
+            "the conflicting package or configure "
+            f"{CARLA_PYTHONAPI_ENV} before starting the application, then "
+            "restart it."
+        )
+    return basic_agent, None
