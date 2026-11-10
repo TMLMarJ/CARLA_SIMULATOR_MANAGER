@@ -1,0 +1,10 @@
+tester_function.ipynb
+/images/maps/generated/*.png
+/resources/maps/generated/*.png
+
+/docs/implementation/
+/docs/architecture/legacy
+/docs/thesis/
+
+__pycache__/
+*.py[cod]
