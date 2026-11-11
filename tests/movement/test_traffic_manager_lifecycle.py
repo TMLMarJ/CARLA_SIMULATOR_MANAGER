@@ -38,7 +38,9 @@ class FakeVehicle:
         self.events.append(("autopilot", bool(enabled), int(port)))
 
 
-def lifecycle_controller(mode=AUTOPILOT_DESTINATION):
+def lifecycle_controller(
+        mode=AUTOPILOT_DESTINATION,
+        executor=CarlaController.DESTINATION_EXECUTOR_BASIC_AGENT):
     controller = object.__new__(CarlaController)
     events = []
     vehicle = FakeVehicle(events)
@@ -57,7 +59,7 @@ def lifecycle_controller(mode=AUTOPILOT_DESTINATION):
     controller.traffic_manager = FakeTrafficManager(events)
     controller.traffic_manager_world_id = 1
     controller.vehicle_navigation_runtime = {
-        vehicle.id: {"world_id": 1},
+        vehicle.id: {"world_id": 1, "executor": executor},
     }
     controller.vehicle_navigation_submission_counts = {vehicle.id: 1}
     controller.vehicle_navigation_submission_sequence = 1
@@ -258,7 +260,9 @@ class TrafficManagerLifecycleTests(unittest.TestCase):
         self.assertTrue(second.traffic_manager_exclusive_owned)
 
     def test_custom_path_is_cleared_before_autopilot_unregisters(self):
-        controller, vehicle, events = lifecycle_controller()
+        controller, vehicle, events = lifecycle_controller(
+            executor=CarlaController.DESTINATION_EXECUTOR_PATH,
+        )
 
         controller._release_vehicle_control(
             vehicle.id,

@@ -96,18 +96,21 @@ class SensorLifecycleTests(unittest.TestCase):
 
     def test_cleanup_sensor_previews_stops_every_active_preview(self):
         controller = sensor_controller()
+        sensors = {
+            sensor_id: mock.Mock(is_alive=True)
+            for sensor_id in (10, 11)
+        }
+        for sensor in sensors.values():
+            sensor.is_listening.return_value = True
+        controller.database.sensors_db.sensors.update(sensors)
         controller.sensor_preview_ids.update({10, 11})
-        controller.stop_sensor_preview_actor = mock.Mock(
-            side_effect=controller.sensor_preview_ids.discard
-        )
 
         controller.cleanup_sensor_previews()
 
         self.assertEqual(set(), controller.sensor_preview_ids)
-        self.assertCountEqual(
-            [mock.call(10), mock.call(11)],
-            controller.stop_sensor_preview_actor.call_args_list,
-        )
+        for sensor in sensors.values():
+            sensor.stop.assert_called_once_with()
+            sensor.destroy.assert_not_called()
 
     def test_remove_sensor_queues_command_for_managed_sensor(self):
         controller = sensor_controller()

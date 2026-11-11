@@ -206,7 +206,7 @@ class StaticInfrastructureTests(unittest.TestCase):
         )
 
     def test_controlled_map_load_baseline_contains_only_static_actors(self):
-        controller = object.__new__(CarlaController)
+        controller = CarlaController(self.database)
         world = FakeWorld(7, [
             FakeActor(20, "static.prop.box01"),
             FakeActor(21, "vehicle.test"),
@@ -219,7 +219,7 @@ class StaticInfrastructureTests(unittest.TestCase):
         self.assertEqual(7, controller.map_infrastructure_world_id)
 
     def test_initial_connection_captures_baseline_before_world_sync(self):
-        controller = object.__new__(CarlaController)
+        controller = CarlaController(self.database)
         world = FakeWorld(7, [FakeActor(20, "static.prop.box01")])
         calls = []
         controller._capture_map_infrastructure = Mock(
@@ -247,8 +247,8 @@ class StaticInfrastructureTests(unittest.TestCase):
         )
 
     def test_reconnect_rebuilds_infrastructure_for_current_episode(self):
-        first = object.__new__(CarlaController)
-        second = object.__new__(CarlaController)
+        first = CarlaController(DataStorage())
+        second = CarlaController(DataStorage())
         first_world = FakeWorld(7, [FakeActor(20, "static.prop.first")])
         second_world = FakeWorld(8, [FakeActor(30, "static.prop.second")])
         for controller in (first, second):
