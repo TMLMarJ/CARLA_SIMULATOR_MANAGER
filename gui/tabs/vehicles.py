@@ -82,6 +82,7 @@ class CustomVehicleFrame(tk.Frame):
         self.choose_model = tk.StringVar()
         self.actor_model = {}
         self.ghost_preview_enabled = tk.BooleanVar(value=True)
+        self.set_as_ego_vehicle = tk.BooleanVar(value=False)
 
     def _vehicle_frame_setup(self):
         vehicle_classes = ["Car", "Bus", "Van", "Truck", "Motorcycle", "Bicycle"]
@@ -188,6 +189,12 @@ class CustomVehicleFrame(tk.Frame):
             variable=self.ghost_preview_enabled,
             command=self._toggle_ghost_preview,
         ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(10, 0))
+
+        ttk.Checkbutton(
+            heading_frame,
+            text="Set as Ego Vehicle",
+            variable=self.set_as_ego_vehicle,
+        ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
         #==================================== Location ===================================
         position_frame = ttk.Frame(location_frame, style="new.TFrame")
@@ -455,16 +462,20 @@ class CustomVehicleFrame(tk.Frame):
         )
         if self.choose_model.get() not in actor_model:
             return
+        attributes = dict(
+            self.configured_blueprint_attributes
+            or self.database.blueprint_new_data
+            or {}
+        )
+        ego_variable = getattr(self, "set_as_ego_vehicle", None)
+        if ego_variable is not None and ego_variable.get():
+            attributes["role_name"] = "hero"
         data = {
             "name": vehicle_name,
             "transform": transform,
             "sensors": "",
             "blueprint_id": actor_model[self.choose_model.get()],
-            "attributes": dict(
-                self.configured_blueprint_attributes
-                or self.database.blueprint_new_data
-                or {}
-            ),
+            "attributes": attributes,
             "physics": (
                 self.configured_physics
                 if self.configured_physics is not None
@@ -700,6 +711,7 @@ class CustomVehicleFrame(tk.Frame):
     def reset_tab(self):
         self.vehicle_name_var.set("Ghost Vehicle")
         self.choose_class.set("Car")
+        self.set_as_ego_vehicle.set(False)
         self._update_model(None)
         self.x_position_var.set(self.database.available_spawn_points[0].location.x if self.database.available_spawn_points else 0)
         self.y_position_var.set(self.database.available_spawn_points[0].location.y if self.database.available_spawn_points else 0)
@@ -717,7 +729,9 @@ class CustomVehicleFrame(tk.Frame):
         selected_vehicle = self.vehicle_table.tree.selection()
         if selected_vehicle:
             vehicle_data = self.vehicle_table.tree.item(selected_vehicle)["values"]
-            self.vehicle_name_var.set(vehicle_data[0])
+            self.vehicle_name_var.set(
+                self.vehicle_table.plain_name(vehicle_data[0])
+            )
             self.choose_class.set(vehicle_data[2].split(":")[0])
             self.choose_model.set(vehicle_data[2].split(":")[1])
             x_location = float(vehicle_data[3].strip("{(())}").split(",")[0])
@@ -737,6 +751,9 @@ class CustomVehicleFrame(tk.Frame):
 
 
 class VehicleTable(ttk.Frame):
+    EGO_TAG = "ego_vehicle"
+    EGO_SUFFIX = " [EGO]"
+
     def __init__(self, parent, controller):
         super().__init__(parent, style="new.TFrame")
         self.controller = controller
@@ -798,6 +815,29 @@ class VehicleTable(ttk.Frame):
         scrollbar.pack(side="right", fill="y")
 
         self.tree.bind("<Double-1>", self.edit_cell)
+        self.tree.tag_configure(self.EGO_TAG, background="#E5EBD8")
+
+    @classmethod
+    def display_name(cls, name, is_ego):
+        plain_name = cls.plain_name(name)
+        return plain_name + cls.EGO_SUFFIX if is_ego else plain_name
+
+    @classmethod
+    def plain_name(cls, name):
+        name = str(name)
+        return (
+            name[:-len(cls.EGO_SUFFIX)]
+            if name.endswith(cls.EGO_SUFFIX)
+            else name
+        )
+
+    def _set_ego_tag(self, item, is_ego):
+        tags = set(self.tree.item(item).get("tags", ()))
+        if is_ego:
+            tags.add(self.EGO_TAG)
+        else:
+            tags.discard(self.EGO_TAG)
+        self.tree.item(item, tags=tuple(sorted(tags)))
 
     def edit_cell(self, event):
         region = self.tree.identify("region", event.x, event.y)
@@ -821,7 +861,7 @@ class VehicleTable(ttk.Frame):
 
         x, y, width, height = bbox
 
-        value = self.tree.set(row, column)
+        value = self.plain_name(self.tree.set(row, column))
 
         entry = ttk.Entry(self.tree)
         entry.insert(0, value)
@@ -837,7 +877,12 @@ class VehicleTable(ttk.Frame):
             except ValueError:
                 entry.destroy()
                 return
-            self.tree.set(row, column, new_value)
+            is_ego = self.EGO_TAG in self.tree.item(row).get("tags", ())
+            self.tree.set(
+                row,
+                column,
+                self.display_name(new_value, is_ego),
+            )
             vehicle_id = self.tree.item(row)["values"][1]
             self.controller.database.actors_db.actors_db[vehicle_id].user_name = new_value
             entry.destroy()
@@ -847,14 +892,21 @@ class VehicleTable(ttk.Frame):
         entry.bind("<Escape>", lambda event: entry.destroy())
 
     def add_vehicle_to_table(self, vehicle_info):
-        name = vehicle_info["name"]
+        is_ego = bool(vehicle_info.get("is_ego_vehicle", False))
+        name = self.display_name(vehicle_info["name"], is_ego)
         vehicle_id = vehicle_info["carla_id"]
         model = vehicle_info["type_id"]
         location = f"({vehicle_info['location']})",
         rotation = f"({vehicle_info['rotation']})",
         sensors = actor_sensor_status(self.database, vehicle_id)
         status = vehicle_info.get("status", vehicle_info.get("is_active", "Unknown"))
-        self.tree.insert("", "end", values=(name, vehicle_id, model, location, rotation, sensors, status))
+        tags = (self.EGO_TAG,) if is_ego else ()
+        self.tree.insert(
+            "",
+            "end",
+            values=(name, vehicle_id, model, location, rotation, sensors, status),
+            tags=tags,
+        )
 
     def remove_vehicle_from_table(self, vehicle_info):
         vehicle_id = vehicle_info["carla_id"]
@@ -864,13 +916,15 @@ class VehicleTable(ttk.Frame):
         vehicle_id = vehicle_info["carla_id"]
         item = find_tree_item_by_runtime_id(self.tree, vehicle_id)
         if item is not None:
-            name = vehicle_info["name"]
+            is_ego = bool(vehicle_info.get("is_ego_vehicle", False))
+            name = self.display_name(vehicle_info["name"], is_ego)
             model = vehicle_info["type_id"]
             location = f"({vehicle_info['location']})",
             rotation = f"({vehicle_info['rotation']})",
             sensors = actor_sensor_status(self.database, vehicle_id)
             status = vehicle_info.get("status", vehicle_info.get("is_active", "Unknown"))
             self.tree.item(item, values=(name, vehicle_id, model, location, rotation, sensors, status))
+            self._set_ego_tag(item, is_ego)
 
     def initialize_data(self):
         for actor_id, actor_info in self.database.actors_db.actors_db.items():
@@ -892,7 +946,10 @@ class VehicleTable(ttk.Frame):
                         if transform is not None else "Unknown"
                     ),
                     "sensors": "",  # TODO: Implement sensor information retrieval when the sensor management is implemented
-                    "status": actor_ownership_status(actor_info)
+                    "status": actor_ownership_status(actor_info),
+                    "is_ego_vehicle": bool(
+                        getattr(actor_info, "is_ego_vehicle", False)
+                    ),
                 }
                 self.add_vehicle_to_table(vehicle_info)
 

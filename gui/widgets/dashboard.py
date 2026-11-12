@@ -348,9 +348,12 @@ class SimulationDashboardFrame(ttk.Frame):
         counts = self.actor_rows(statistics)
         for category in self.ACTOR_CATEGORIES + ("Total",):
             row = counts[category]
+            category_label = category
+            if category == "Vehicles":
+                category_label = f"Vehicles (EGO: {row['Ego']})"
             self.actor_tree.item(
                 category,
-                values=(category, row["Total"], row["GUI Managed"],
+                values=(category_label, row["Total"], row["GUI Managed"],
                         row["External"], row["Internal"]),
             )
 
@@ -404,7 +407,8 @@ class SimulationDashboardFrame(ttk.Frame):
             )):
                 continue
             actor_id = int(actor["actor_id"])
-            label = f"{actor_id} — {type_id}"
+            ego_label = " [EGO]" if actor.get("is_ego_vehicle") else ""
+            label = f"{actor_id} — {type_id}{ego_label}"
             choices[label] = {
                 "runtime_id": actor_id,
                 "type_id": type_id,
@@ -507,6 +511,7 @@ class SimulationDashboardFrame(ttk.Frame):
         rows = {
             category: {
                 "Total": 0,
+                "Ego": 0,
                 **{ownership: 0 for ownership in cls.OWNERSHIP_COLUMNS},
             }
             for category in cls.ACTOR_CATEGORIES
@@ -518,9 +523,11 @@ class SimulationDashboardFrame(ttk.Frame):
                 continue
             rows[category]["Total"] += 1
             rows[category][ownership] += 1
+            if category == "Vehicles" and actor.get("is_ego_vehicle"):
+                rows[category]["Ego"] += 1
         rows["Total"] = {
             key: sum(row[key] for row in rows.values())
-            for key in ("Total",) + cls.OWNERSHIP_COLUMNS
+            for key in ("Total", "Ego") + cls.OWNERSHIP_COLUMNS
         }
         return rows
 

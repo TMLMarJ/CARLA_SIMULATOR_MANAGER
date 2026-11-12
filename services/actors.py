@@ -35,6 +35,18 @@ class ActorService:
         return actor
 
     @staticmethod
+    def replacement_attributes(actor_info, requested_attributes):
+        attributes = dict(requested_attributes or {})
+        role_name = str(
+            getattr(actor_info, "blueprint_attributes", {}).get(
+                "role_name", ""
+            )
+        )
+        if role_name.strip().lower() in {"hero", "ego"}:
+            attributes["role_name"] = role_name
+        return attributes
+
+    @staticmethod
     def physics_value(value):
         try:
             return float(value)

@@ -132,6 +132,13 @@ class ActorInfo:
                 DataSource.UNKNOWN,
             )
 
+        self.is_ego_vehicle = (
+            self.category == ActorCategory.VEHICLE
+            and ActorClassifier.is_ego_role_name(
+                self.blueprint_attributes.get("role_name")
+            )
+        )
+
         if self.category == ActorCategory.VEHICLE:
             physics = _read(actor, "get_physics_control", call=True)
             if physics is not None:
