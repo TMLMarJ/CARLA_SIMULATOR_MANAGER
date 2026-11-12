@@ -1203,6 +1203,13 @@ class CarlaController(MovementRuntime, SimulationRuntime, ScenarioRuntime):
                             f"Actor {actor_id} is no longer available."
                         )
 
+                    blueprint_attributes = (
+                        self.actor_service.replacement_attributes(
+                            actor_info,
+                            blueprint_attributes,
+                        )
+                    )
+
                     transform = old_actor.get_transform()
                     name = actor_info.user_name
                     preserved_metadata = {

@@ -2,6 +2,7 @@ from models.scenarios import ActorCategory
 
 
 class ActorClassifier:
+    EGO_ROLE_NAMES = {"hero", "ego"}
     INTERNAL_ROLE_NAMES = {
         "movement_control_preview",
         "spectator_preview",
@@ -62,6 +63,18 @@ class ActorClassifier:
             return str(attributes.get("role_name", "")).strip().lower()
         except (AttributeError, RuntimeError, TypeError):
             return ""
+
+    @classmethod
+    def is_ego_role_name(cls, role_name):
+        return str(role_name or "").strip().lower() in cls.EGO_ROLE_NAMES
+
+    @classmethod
+    def is_ego_vehicle(cls, actor):
+        type_id = str(getattr(actor, "type_id", ""))
+        return (
+            type_id.startswith("vehicle.")
+            and cls.is_ego_role_name(cls.role_name(actor))
+        )
 
     @classmethod
     def dashboard_category(cls, type_id):

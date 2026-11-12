@@ -259,9 +259,15 @@ class WorldCleaner:
                 actor_id
                 for actor_id, item in inventory.items()
                 if (
-                    item.category in (
-                        ActorCategory.VEHICLE,
-                        ActorCategory.PEDESTRIAN,
+                    item.category == ActorCategory.PEDESTRIAN
+                    or (
+                        item.category == ActorCategory.VEHICLE
+                        and not (
+                            item.ownership == ActorOwnership.EXTERNAL
+                            and self.classifier.is_ego_role_name(
+                                item.identity.role_name
+                            )
+                        )
                     )
                     or (
                         item.category == ActorCategory.STATIC_OBJECT
@@ -297,6 +303,20 @@ class WorldCleaner:
                 if (
                     item.category == ActorCategory.STATIC_OBJECT
                     and item.ownership == ActorOwnership.EXTERNAL
+                )
+            )
+            skipped.extend(
+                {
+                    "runtime_id": actor_id,
+                    "reason": "external_ego_preserved",
+                }
+                for actor_id, item in sorted(inventory.items())
+                if (
+                    item.category == ActorCategory.VEHICLE
+                    and item.ownership == ActorOwnership.EXTERNAL
+                    and self.classifier.is_ego_role_name(
+                        item.identity.role_name
+                    )
                 )
             )
         else:
@@ -340,15 +360,24 @@ class WorldCleaner:
                 entry.get("reason") == "external_static_preserved"
                 for entry in skipped
             )
+            preserved_ego = sum(
+                entry.get("reason") == "external_ego_preserved"
+                for entry in skipped
+            )
             warnings.append(
-                "Scenario replacement selectively removes all vehicles and "
+                "Scenario replacement selectively removes vehicles and "
                 "pedestrians, managed static objects, and dependent sensors "
-                "or controllers."
+                "or controllers; external Ego vehicles are preserved."
             )
             if preserved_static:
                 warnings.append(
                     f"{preserved_static} external static object(s) will be "
                     "preserved on the current map."
+                )
+            if preserved_ego:
+                warnings.append(
+                    f"{preserved_ego} external Ego vehicle(s) will be "
+                    "preserved during Scenario Load."
                 )
         if cascade_dependencies:
             warnings.append(

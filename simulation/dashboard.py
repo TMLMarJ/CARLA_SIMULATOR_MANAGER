@@ -359,6 +359,7 @@ class SimulationDashboardMonitor:
                 "type_id": type_id,
                 "category": category,
                 "ownership": ownership,
+                "is_ego_vehicle": ActorClassifier.is_ego_vehicle(actor),
             }
             actor_statistics["actors"].append(actor_entry)
             actor_statistics["categories"][category] += 1

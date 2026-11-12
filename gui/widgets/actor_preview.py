@@ -85,9 +85,16 @@ class GhostPreview:
 
 class ActorPreviewFrame(tk.Frame):
     refresh_interval_ms = 100
+    preview_width = 280
+    preview_height = 210
 
     def __init__(self, parent, preview):
-        super().__init__(parent)
+        super().__init__(
+            parent,
+            width=self.preview_width,
+            height=self.preview_height,
+        )
+        self.pack_propagate(False)
 
         self.preview = preview
         self._last_image_revision = -1
