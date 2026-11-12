@@ -140,6 +140,25 @@ class ScenarioLoadPreflightTests(unittest.TestCase):
         self.assertEqual(json_plan.actor_count, yaml_plan.actor_count)
         self.assertEqual(json_plan.target_map, yaml_plan.target_map)
 
+    def test_server_version_difference_warns_but_does_not_block_load(self):
+        document = valid_document()
+        path = self.write_document(document)
+
+        plan = self.loader.prepare(
+            path,
+            self.world,
+            self.maps,
+            blueprint_library(),
+            server_version="0.9.15",
+        )
+
+        self.assertTrue(plan.ready_for_execution)
+        self.assertEqual(LoadReadiness.WARNING, plan.status)
+        self.assertTrue(any(
+            "differs from server version" in warning
+            for warning in plan.warnings
+        ))
+
     def test_rejects_unsupported_schema_version(self):
         document = valid_document()
         document["schema_version"] = 99

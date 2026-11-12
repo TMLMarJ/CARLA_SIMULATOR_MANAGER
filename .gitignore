@@ -1,10 +1,12 @@
 tester_function.ipynb
+/.idea/
 /images/maps/generated/*.png
 /resources/maps/generated/*.png
 
 /docs/implementation/
 /docs/architecture/legacy
 /docs/thesis/
+/venvv15/
 
 __pycache__/
 *.py[cod]

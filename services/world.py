@@ -2,41 +2,61 @@ from utilities.functions import (
     get_pedestrian_blueprint_ids,
     parse_weather_to_dict,
 )
+from utilities.map_names import maps_equal
 
 
 class WorldService:
     @staticmethod
     def load_with_retry(client, map_name, shutdown_event, attempts=10):
+        load_error = None
+        validation_error = None
+        observed_map = None
+        observed_episode = None
         try:
-            new_world = client.load_world(map_name)
-        except RuntimeError:
-            print("load_world timeout, waiting for server...")
-            new_world = None
+            # Do not validate the proxy returned by load_world().  Older CARLA
+            # servers can complete the episode switch while that proxy already
+            # belongs to the outgoing episode.
+            client.load_world(map_name)
+        except RuntimeError as error:
+            load_error = error
 
-            for attempt in range(attempts):
+        for attempt in range(attempts):
+            try:
+                current_world = client.get_world()
+                observed_map = current_world.get_map().name
                 try:
-                    current_world = client.get_world()
-                    current_name = (
-                        current_world.get_map().name.split("/")[-1]
-                    )
-                    print(f"Attempt {attempt + 1}: {current_name}")
-                    if current_name == map_name:
-                        new_world = current_world
-                        print("Map changed successfully")
-                        break
-                except RuntimeError:
-                    print(f"Attempt {attempt + 1}: server not ready")
-                if shutdown_event.wait(1.0):
-                    raise RuntimeError(
-                        "World change cancelled during shutdown."
-                    )
+                    observed_episode = int(current_world.id)
+                except (AttributeError, RuntimeError, TypeError, ValueError):
+                    observed_episode = None
+                if maps_equal(observed_map, map_name):
+                    return current_world
+                validation_error = None
+            except RuntimeError as error:
+                validation_error = error
+            if attempt + 1 < attempts and shutdown_event.wait(1.0):
+                raise RuntimeError(
+                    "World change cancelled during shutdown."
+                ) from (validation_error or load_error)
 
-        if (
-            new_world is None
-            or new_world.get_map().name.split("/")[-1] != map_name
-        ):
-            raise RuntimeError(f"Failed to load map: {map_name}")
-        return new_world
+        details = []
+        if observed_map is not None:
+            details.append(f"active map is '{observed_map}'")
+        if observed_episode is not None:
+            details.append(f"active episode is {observed_episode}")
+        if load_error is not None:
+            details.append(
+                f"load_world raised {type(load_error).__name__}: {load_error}"
+            )
+        if validation_error is not None:
+            details.append(
+                "fresh-world validation raised "
+                f"{type(validation_error).__name__}: {validation_error}"
+            )
+        suffix = f" ({'; '.join(details)})" if details else ""
+        cause = validation_error or load_error
+        raise RuntimeError(
+            f"Failed to activate map '{map_name}'{suffix}"
+        ) from cause
 
     @staticmethod
     def install(context, simulation_manager):

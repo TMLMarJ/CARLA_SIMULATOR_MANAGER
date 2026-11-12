@@ -24,7 +24,8 @@ class ScenarioManager:
         )
 
     def save(self, world, database, internal_actor_ids, name, path,
-             file_format, synchronize, cancel_check=None):
+             file_format, synchronize, cancel_check=None,
+             server_version=None):
         target = normalize_scenario_path(path, file_format)
         sync_report = synchronize(
             world,
@@ -37,6 +38,7 @@ class ScenarioManager:
             name,
             internal_actor_ids=internal_actor_ids,
             sync_report=sync_report,
+            server_version=server_version,
         )
         self.validator.validate(document)
         if cancel_check is not None and cancel_check():

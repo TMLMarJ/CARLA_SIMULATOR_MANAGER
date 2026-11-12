@@ -9,6 +9,8 @@ from core.state_store import DataStorage
 from models.scenarios import ActorCategory
 from movement.vehicle import AUTOPILOT_DESTINATION, AUTOPILOT_FREE_ROAM
 from movement import runtime as movement_runtime_module
+from scenarios.loader import ScenarioLoader
+from services.world import WorldService
 
 
 class FakeTrafficManager:
@@ -479,7 +481,7 @@ class TrafficManagerLifecycleTests(unittest.TestCase):
         controller = object.__new__(CarlaController)
         new_library = SimpleNamespace(filter=lambda _pattern: [])
         new_map = SimpleNamespace(
-            name="/Game/Carla/Maps/Town10HD_Opt",
+            name="Carla/Maps/Town10HD_Opt",
             get_spawn_points=lambda: ["spawn"],
         )
         new_world = SimpleNamespace(
@@ -518,14 +520,20 @@ class TrafficManagerLifecycleTests(unittest.TestCase):
             }),
             settings_changed=Mock(),
         )
-        controller.scenario_manager = SimpleNamespace(loader=SimpleNamespace(
-            map_key=lambda _target: "Town10HD_Opt",
-            maps_equal=lambda _target, _actual: True,
-        ))
+        controller.scenario_manager = SimpleNamespace(loader=ScenarioLoader())
+        controller.world_service = WorldService()
+        controller.shutdown_event = Mock()
+        controller.shutdown_event.wait.return_value = False
+        stale_world = SimpleNamespace(
+            get_map=Mock(side_effect=RuntimeError("different episode")),
+        )
         controller.client = SimpleNamespace(
             set_timeout=Mock(),
-            load_world=Mock(return_value=new_world),
-            get_available_maps=Mock(return_value=["Town10HD_Opt"]),
+            load_world=Mock(return_value=stale_world),
+            get_world=Mock(return_value=new_world),
+            get_available_maps=Mock(return_value=[
+                "/Game/Carla/Maps/Town10HD_Opt"
+            ]),
             get_server_version=Mock(return_value="test"),
             get_trafficmanager=Mock(side_effect=AssertionError(
                 "TM must be initialized lazily in the new world"
@@ -539,10 +547,13 @@ class TrafficManagerLifecycleTests(unittest.TestCase):
             return_value={"cloudiness": 0.0},
         ):
             world, library, _maps, _version = (
-                controller._replace_world_for_load("Town10HD_Opt")
+                controller._replace_world_for_load(
+                    "/Game/Carla/Maps/Town10HD_Opt"
+                )
             )
 
         self.assertIs(new_world, world)
+        stale_world.get_map.assert_not_called()
         self.assertIs(new_library, library)
         self.assertIs(new_world, controller.database.world)
         self.assertEqual(10, controller.database.world_id)
@@ -552,6 +563,9 @@ class TrafficManagerLifecycleTests(unittest.TestCase):
         controller.client.get_trafficmanager.assert_not_called()
         self.assertEqual({}, controller.database.vehicle_control_states)
         self.assertEqual({}, controller.database.walker_ai_states)
+        controller.client.load_world.assert_called_once_with(
+            "/Game/Carla/Maps/Town10HD_Opt"
+        )
 
 
 if __name__ == "__main__":

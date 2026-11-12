@@ -1,4 +1,7 @@
 import unittest
+import queue
+import threading
+from types import SimpleNamespace
 from unittest import mock
 
 from core.controller import CarlaController
@@ -59,6 +62,40 @@ class ControllerRuntimeDelegationTests(unittest.TestCase):
         controller._perform_world_sync.assert_called_once_with(
             world,
             reason="manual",
+        )
+
+    def test_save_runtime_passes_actual_server_version(self):
+        controller = CarlaController.__new__(CarlaController)
+        controller.shutdown_event = mock.Mock()
+        controller.shutdown_event.is_set.return_value = False
+        controller.client = mock.Mock()
+        controller.client.get_server_version.return_value = "0.9.15"
+        controller.scenario_manager = mock.Mock()
+        controller.scenario_manager.save.return_value = {"success": True}
+        controller.database = SimpleNamespace(
+            scenario_event_queue=queue.Queue(),
+        )
+        controller.scenario_operation_lock = threading.Lock()
+        controller.scenario_operation_pending = True
+        controller.scenario_operation_kind = "save"
+        controller._collect_internal_actor_ids = mock.Mock(return_value=set())
+        controller._perform_world_sync = mock.Mock()
+        world = object()
+        blueprint_library = object()
+
+        result = controller._handle_scenario_runtime_command(
+            "save_scenario",
+            {"name": "Test", "path": "test.json", "format": "json"},
+            world,
+            blueprint_library,
+        )
+
+        self.assertEqual((world, blueprint_library), result)
+        self.assertEqual(
+            "0.9.15",
+            controller.scenario_manager.save.call_args.kwargs[
+                "server_version"
+            ],
         )
 
 

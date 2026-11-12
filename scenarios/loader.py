@@ -14,6 +14,12 @@ from models.scenarios import (
 )
 from scenarios.serialization import ScenarioSerializer
 from scenarios.validation import ScenarioValidator
+from utilities.map_names import (
+    AmbiguousMapError,
+    map_basename,
+    maps_equal,
+    resolve_available_map,
+)
 
 
 class LoadReadiness:
@@ -131,9 +137,18 @@ class ScenarioLoader:
         target_map = document["world"]["map"]
         current_map = str(world.get_map().name)
         map_change_required = not self.maps_equal(target_map, current_map)
-        map_available = None if available_maps is None else any(
-            self.maps_equal(target_map, available)
-            for available in available_maps
+        map_resolution_error = None
+        resolved_map = None
+        if available_maps is not None:
+            try:
+                resolved_map = resolve_available_map(
+                    target_map,
+                    available_maps,
+                )
+            except AmbiguousMapError as error:
+                map_resolution_error = str(error)
+        map_available = (
+            None if available_maps is None else resolved_map is not None
         )
         plan = ScenarioLoadPlan(
             token=str(uuid.uuid4()),
@@ -173,7 +188,8 @@ class ScenarioLoader:
         )
         if map_available is False:
             plan.critical_problems.append(
-                f"Target map '{target_map}' is not available on the server."
+                map_resolution_error
+                or f"Target map '{target_map}' is not available on the server."
             )
         elif map_available is None:
             plan.unverified_items.append(
@@ -199,10 +215,11 @@ class ScenarioLoader:
             and str(server_version) == str(captured_version)
         )
         if server_version and str(server_version) != str(captured_version):
-            plan.unverified_items.append(
+            plan.warnings.append(
                 "Scenario CARLA version "
                 f"'{captured_version}' differs from server version "
-                f"'{server_version}'; API compatibility must be rechecked."
+                f"'{server_version}'; available blueprints, attributes and "
+                "settings will be validated against the connected server."
             )
 
         ordered = self._topological_order(eligible_actors)
@@ -394,13 +411,13 @@ class ScenarioLoader:
             attachment = actor.get("attachment_type")
             if attachment is None:
                 item.warnings.append(
-                    "Sensor attachment type is unknown; Stage 5.2 must apply "
-                    "an explicit fallback policy."
+                    "Sensor attachment type is absent; the legacy Rigid "
+                    "default will be used."
                 )
             elif attachment not in self.ATTACHMENT_TYPES:
-                item.warnings.append(
+                item.critical_problems.append(
                     f"Sensor attachment type '{attachment}' is not recognized; "
-                    "restoration will use the documented Rigid fallback."
+                    "the scenario cannot be restored safely."
                 )
 
     def _inspect_completeness(self, actor, item):
@@ -454,9 +471,9 @@ class ScenarioLoader:
                 "applied during restoration."
             )
         if item.unverified_physics_fields:
-            item.unverified_items.append(
-                "Vehicle physics field compatibility is unverified for the "
-                "connected CARLA server version."
+            item.warnings.append(
+                "Vehicle physics were captured with another CARLA server "
+                "version; supported fields will be restored and reported."
             )
 
     @staticmethod
@@ -560,18 +577,15 @@ class ScenarioLoader:
 
     @staticmethod
     def map_key(map_name):
-        normalized = str(map_name or "").replace("\\", "/").rstrip("/")
-        return normalized.rsplit("/", 1)[-1]
+        return map_basename(map_name)
 
     @classmethod
     def maps_equal(cls, first, second):
-        first_text = str(first or "").replace("\\", "/").rstrip("/")
-        second_text = str(second or "").replace("\\", "/").rstrip("/")
-        return first_text == second_text or (
-            bool(first_text)
-            and bool(second_text)
-            and cls.map_key(first_text) == cls.map_key(second_text)
-        )
+        return maps_equal(first, second)
+
+    @staticmethod
+    def resolve_map(map_name, available_maps):
+        return resolve_available_map(map_name, available_maps)
 
     @staticmethod
     def _world_id(world):

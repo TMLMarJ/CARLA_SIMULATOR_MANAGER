@@ -343,6 +343,12 @@ class CustomStaticObjectFrame(tk.Frame):
         self.controller.carla.spawn_actor(data)
         if wait_and_try(lambda: self.database.spawned_actor_id is not None):
             actor_data["carla_id"] = self.database.spawned_actor_id
+            with self.database.lock:
+                actor_info = self.database.actors_db.actors_db.get(
+                    self.database.spawned_actor_id
+                )
+                if actor_info is not None:
+                    actor_data["name"] = actor_info.user_name
             actor_data["status"] = "Managed"
             self.actor_table.add_actor_to_table(actor_data)
             self.database.spawned_actor_id = None
@@ -461,10 +467,21 @@ class StaticObjectTable(ttk.Frame):
         entry.select_range(0, tk.END)
 
         def save(event=None):
-            new_value = entry.get()
+            actor_id = int(self.tree.item(row)["values"][1])
+            try:
+                new_value = self.database.rename_actor(
+                    actor_id,
+                    entry.get(),
+                )
+            except (KeyError, ValueError) as error:
+                messagebox.showerror(
+                    "Rename static object",
+                    str(error),
+                    parent=self,
+                )
+                entry.destroy()
+                return
             self.tree.set(row, column, new_value)
-            actor_id = self.tree.item(row)["values"][1]
-            self.database.actors_db.actors_db[actor_id].user_name = new_value
             entry.destroy()
 
         entry.bind("<Return>", save)

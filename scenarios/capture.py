@@ -47,7 +47,7 @@ class ScenarioCapture:
         self.classifier = classifier or ActorClassifier
 
     def capture(self, world, database, name, internal_actor_ids=None,
-                sync_report=None):
+                sync_report=None, server_version=None):
         internal_actor_ids = set(internal_actor_ids or ())
         actors = list(world.get_actors())
         with database.lock:
@@ -171,7 +171,7 @@ class ScenarioCapture:
             for actor in candidates
         )
 
-        map_name = str(world.get_map().name).split("/")[-1]
+        map_name = str(world.get_map().name)
         world_data = ScenarioWorld(
             map=map_name,
             captured_world_id=int(world.id),
@@ -184,6 +184,9 @@ class ScenarioCapture:
                 datetime.now(timezone.utc)
                 .isoformat(timespec="seconds")
                 .replace("+00:00", "Z")
+            ),
+            carla_version=(
+                str(server_version) if server_version is not None else "unknown"
             ),
         )
         return ScenarioDocument(

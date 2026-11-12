@@ -27,7 +27,7 @@ def _world_id(actor, fallback=None):
     world = _actor_world(actor)
     try:
         return int(world.id)
-    except (AttributeError, TypeError, ValueError):
+    except (AttributeError, RuntimeError, TypeError, ValueError):
         return fallback
 
 
@@ -94,7 +94,8 @@ class ActorInfo:
             self.category = ActorClassifier.classify_type_id(self.type_id)
 
         self.world = _actor_world(actor)
-        self.world_id = _world_id(actor, self.world_id)
+        if self.world_id is None:
+            self.world_id = _world_id(actor)
         self.is_alive = bool(_read(actor, "is_alive", False))
         self.is_active = bool(_read(actor, "is_active", False))
         parent = _read(actor, "parent")
@@ -244,7 +245,8 @@ class SensorInfo:
         self.runtime_id = self.carla_id
         self.type_id = str(sensor.type_id)
         self.blueprint_id = self.type_id
-        self.world_id = _world_id(sensor, self.world_id)
+        if self.world_id is None:
+            self.world_id = _world_id(sensor)
         self.is_alive = bool(_read(sensor, "is_alive", False))
         self.is_active = bool(_read(sensor, "is_active", False))
         self.transform = _read(sensor, "get_transform", call=True)

@@ -1,5 +1,8 @@
 import carla
 
+from utilities.logical_names import default_logical_name
+from utilities.sensor_attachments import resolve_attachment_type
+
 
 class SensorService:
     def __init__(self, database, dashboard_monitor, preview_ids,
@@ -16,6 +19,15 @@ class SensorService:
     def attach(self, data):
         sensor = None
         try:
+            attachment_name = str(data.get("attachment_type") or "Rigid")
+            attachment_type = resolve_attachment_type(
+                carla,
+                attachment_name,
+            )
+            resolved_name = self.database.resolve_unique_managed_name(
+                data.get("name"),
+                default_logical_name(data["blueprint_id"]),
+            )
             parent_id = data["parent_id"]
             with self.database.lock:
                 parent_actor = self.database.actors_db.actors.get(parent_id)
@@ -38,7 +50,7 @@ class SensorService:
                 sensor_blueprint,
                 data["transform"],
                 attach_to=parent_actor,
-                attachment_type=carla.AttachmentType.Rigid,
+                attachment_type=attachment_type,
             )
             if sensor is None:
                 raise RuntimeError("CARLA did not create the sensor.")
@@ -47,17 +59,18 @@ class SensorService:
                 self.database.add_sensor(
                     sensor,
                     parent_id,
-                    data["name"],
+                    resolved_name,
                     data["blueprint_id"],
                     data["transform"],
                     data["attributes"],
+                    attachment_type=attachment_name,
                 )
             self.status_errors.pop(sensor.id, None)
             self.database.sensor_event_queue.put((
                 "sensor_attached",
                 sensor.id,
             ))
-            print(f"Sensor {data['name']} spawned with ID {sensor.id}")
+            print(f"Sensor {resolved_name} spawned with ID {sensor.id}")
         except Exception as error:
             self._record_error(error)
             if sensor is not None:

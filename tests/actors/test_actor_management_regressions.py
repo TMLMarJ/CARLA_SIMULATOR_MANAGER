@@ -208,7 +208,7 @@ class ActorManagementRegressionTests(unittest.TestCase):
             ),
         )
 
-    def test_model_change_command_carries_attributes_and_physics(self):
+    def test_model_change_command_ignores_requested_physics(self):
         controller = CarlaController.__new__(CarlaController)
         controller.command_queue = queue.Queue()
         controller._scenario_mutation_blocked = lambda operation: False
@@ -228,8 +228,52 @@ class ActorManagementRegressionTests(unittest.TestCase):
         self.assertEqual("change_actor_model", command)
         self.assertEqual("vehicle.test.model", data["blueprint_id"])
         self.assertEqual({"role_name": "ego"}, data["attributes"])
-        self.assertIs(physics, data["physics"])
+        self.assertNotIn("physics", data)
         self.assertEqual("request-1", data["request_id"])
+
+    def test_model_change_confirmation_does_not_forward_hidden_physics(self):
+        frame = object.__new__(CustomVehicleFrame)
+        frame._request_vehicle_replacement = mock.Mock(return_value=True)
+        old_physics = physics_control()
+
+        with mock.patch(
+            "gui.tabs.vehicles.messagebox.askyesno",
+            return_value=True,
+        ):
+            result = frame._confirm_model_replacement(
+                17,
+                "vehicle.test.model",
+                {
+                    "blueprint": {"role_name": "hero"},
+                    "physics": old_physics,
+                },
+            )
+
+        self.assertTrue(result)
+        frame._request_vehicle_replacement.assert_called_once_with(
+            17,
+            "vehicle.test.model",
+            {"role_name": "hero"},
+        )
+
+    def test_manual_physics_edit_still_queues_requested_control(self):
+        controller = CarlaController.__new__(CarlaController)
+        controller.command_queue = queue.Queue()
+        controller._scenario_mutation_blocked = lambda operation: False
+        controller._managed_operation_allowed = lambda actor_id: True
+        physics = physics_control()
+
+        accepted = controller.apply_vehicle_physics(
+            17,
+            physics,
+            request_id="physics-1",
+        )
+
+        self.assertTrue(accepted)
+        command, data = controller.command_queue.get_nowait()
+        self.assertEqual("apply_vehicle_physics", command)
+        self.assertIs(physics, data["physics"])
+        self.assertEqual("physics-1", data["request_id"])
 
     def test_model_change_destroys_old_actor_before_spawning_replacement(self):
         source = inspect.getsource(CarlaController._run_controller)
@@ -247,6 +291,25 @@ class ActorManagementRegressionTests(unittest.TestCase):
 
         self.assertLess(destroy_position, spawn_position)
         self.assertLess(unregister_position, spawn_position)
+
+    def test_model_change_uses_new_actor_defaults_and_removes_sensors(self):
+        source = inspect.getsource(CarlaController._run_controller)
+        start = source.index('if cmd == "change_actor_model":')
+        end = source.index('if cmd == "set_actor_transform":', start)
+        change_model_source = source[start:end]
+
+        self.assertNotIn("preserved_physics", change_model_source)
+        self.assertNotIn("requested_physics", change_model_source)
+        self.assertNotIn(
+            "_apply_vehicle_physics_checked",
+            change_model_source,
+        )
+        self.assertIn(
+            "actual_physics = new_actor.get_physics_control()",
+            change_model_source,
+        )
+        self.assertNotIn("self.database.add_sensor(", change_model_source)
+        self.assertIn('"sensors_cleared"', change_model_source)
 
     def test_actor_spawn_does_not_move_spectator(self):
         source = inspect.getsource(CarlaController._run_controller)
@@ -323,8 +386,10 @@ class ActorManagementRegressionTests(unittest.TestCase):
         sensor_info = SimpleNamespace(
             user_name="Front camera",
             carla_id=25,
+            runtime_id=25,
             blueprint_id="sensor.camera.rgb",
             parent_id=17,
+            ownership=ActorOwnership.MANAGED,
             data_sources={},
         )
         database.sensors_db.sensors_db[25] = sensor_info
