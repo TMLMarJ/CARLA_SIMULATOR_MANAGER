@@ -13,6 +13,10 @@ from movement.vehicle import (
 from movement.walker import initial_walker_ai_state
 from simulation.dashboard import SimulationDashboardMonitor
 from simulation.manager import SimulationManager
+from utilities.logical_names import (
+    default_logical_name,
+    unique_logical_name,
+)
 
 
 class DataStorage:
@@ -259,6 +263,51 @@ class DataStorage:
             **metadata,
         )
 
+    def _managed_logical_names_locked(self, exclude_runtime_id=None):
+        names = set()
+        records = list(self.actors_db.actors_db.values())
+        records.extend(self.sensors_db.sensors_db.values())
+        for info in records:
+            if info.ownership != ActorOwnership.MANAGED:
+                continue
+            if (
+                exclude_runtime_id is not None
+                and getattr(info, "runtime_id", None) == exclude_runtime_id
+            ):
+                continue
+            names.add(str(info.user_name))
+        return names
+
+    def resolve_unique_managed_name(self, requested_name, default_name,
+                                    exclude_runtime_id=None):
+        with self.lock:
+            existing_names = self._managed_logical_names_locked(
+                exclude_runtime_id=exclude_runtime_id,
+            )
+        return unique_logical_name(
+            requested_name,
+            existing_names,
+            default_name,
+        )
+
+    def rename_actor(self, actor_id, name):
+        """Rename one managed actor without colliding with managed objects."""
+        actor_id = int(actor_id)
+        with self.lock:
+            actor_info = self.actors_db.actors_db.get(actor_id)
+            if actor_info is None:
+                raise KeyError(f"Actor {actor_id} is no longer available.")
+            if actor_info.ownership != ActorOwnership.MANAGED:
+                raise ValueError("Only GUI-managed actors can be renamed.")
+            resolved_name = unique_logical_name(
+                name,
+                self._managed_logical_names_locked(actor_id),
+                default_logical_name(actor_info.type_id),
+            )
+            actor_info.user_name = resolved_name
+            actor_info.data_sources["user_name"] = "gui"
+        return resolved_name
+
     def is_actor_managed(self, actor_id):
         actor_info = self.actors_db.actors_db.get(int(actor_id))
         return (
@@ -276,16 +325,20 @@ class DataStorage:
     def rename_sensor(self, sensor_id, name):
         """Change only the application's logical sensor name."""
         sensor_id = int(sensor_id)
-        normalized_name = str(name).strip()
-        if not normalized_name:
-            raise ValueError("Sensor name cannot be empty.")
         with self.lock:
             sensor_info = self.sensors_db.sensors_db.get(sensor_id)
             if sensor_info is None:
                 raise KeyError(f"Sensor {sensor_id} is no longer available.")
-            sensor_info.user_name = normalized_name
+            if sensor_info.ownership != ActorOwnership.MANAGED:
+                raise ValueError("Only GUI-managed sensors can be renamed.")
+            resolved_name = unique_logical_name(
+                name,
+                self._managed_logical_names_locked(sensor_id),
+                "Sensor",
+            )
+            sensor_info.user_name = resolved_name
             sensor_info.data_sources["user_name"] = "gui"
-        return normalized_name
+        return resolved_name
 
     def adopt_runtime_actor(self, actor_id, actor, category, origin):
         """Update the existing synchronized record without replacing actor."""

@@ -568,7 +568,7 @@ class CustomVehicleFrame(tk.Frame):
         return True
 
     def _request_vehicle_replacement(self, actor_id, blueprint_id,
-                                     attributes, physics):
+                                     attributes):
         self.controller.close_movement_control_for_actor(
             actor_id,
             "Selected vehicle is being replaced",
@@ -578,7 +578,6 @@ class CustomVehicleFrame(tk.Frame):
             blueprint_id,
             actor_id,
             attributes=attributes,
-            physics=physics,
             request_id=request_id,
         )
         if not accepted:
@@ -620,6 +619,7 @@ class CustomVehicleFrame(tk.Frame):
                             request["actor_id"], blueprint_id, edited
                         )
                         blueprint_data = None
+                        physics_data = None
                         show_blueprint = True
                         show_physics = False
                     else:
@@ -629,6 +629,7 @@ class CustomVehicleFrame(tk.Frame):
                             edited,
                         )
                         blueprint_data = None
+                        physics_data = data["physics"]
                         show_blueprint = False
                         show_physics = True
                     EntityEditWindow(
@@ -637,7 +638,7 @@ class CustomVehicleFrame(tk.Frame):
                         None,
                         "vehicle",
                         self.database.blueprint_lib,
-                        data["physics"],
+                        physics_data,
                         callback,
                         blueprint_data,
                         show_blueprint,
@@ -689,8 +690,9 @@ class CustomVehicleFrame(tk.Frame):
         confirmed = messagebox.askyesno(
             "Replace vehicle model",
             "Changing the model replaces the runtime actor. Movement control "
-            "and active sensor previews will be stopped; attached sensors will "
-            "be recreated. Continue?",
+            "and active sensor previews will be stopped; attached sensors "
+            "will be removed. The new model will use its default CARLA "
+            "physics. Continue?",
             parent=self,
         )
         if not confirmed:
@@ -699,7 +701,6 @@ class CustomVehicleFrame(tk.Frame):
             actor_id,
             blueprint_id,
             data["blueprint"],
-            data["physics"],
         )
 
     def destroy(self):
@@ -871,10 +872,18 @@ class VehicleTable(ttk.Frame):
         entry.select_range(0, tk.END)
 
         def save(event=None):
-            new_value = entry.get()
             try:
-                new_value = str(new_value)
-            except ValueError:
+                vehicle_id = int(self.tree.item(row)["values"][1])
+                new_value = self.controller.database.rename_actor(
+                    vehicle_id,
+                    entry.get(),
+                )
+            except (KeyError, ValueError) as error:
+                messagebox.showerror(
+                    "Rename vehicle",
+                    str(error),
+                    parent=self,
+                )
                 entry.destroy()
                 return
             is_ego = self.EGO_TAG in self.tree.item(row).get("tags", ())
@@ -883,8 +892,6 @@ class VehicleTable(ttk.Frame):
                 column,
                 self.display_name(new_value, is_ego),
             )
-            vehicle_id = self.tree.item(row)["values"][1]
-            self.controller.database.actors_db.actors_db[vehicle_id].user_name = new_value
             entry.destroy()
 
         entry.bind("<Return>", save)

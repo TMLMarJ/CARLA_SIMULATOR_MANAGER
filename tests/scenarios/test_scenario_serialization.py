@@ -188,6 +188,30 @@ class FakeWorld:
         )
 
 
+class LaggingLoadedActorWorld(FakeWorld):
+    """Models the transient actor-list/proxy state observed on CARLA 0.9.15."""
+
+    def __init__(self, actors, hidden_actor_id, world_id=1):
+        super().__init__(actors, world_id=world_id)
+        self.hidden_actor_id = hidden_actor_id
+        self.inventory_reads = 0
+
+    def get_actors(self):
+        self.inventory_reads += 1
+        hidden = next(
+            actor for actor in self.actors
+            if actor.id == self.hidden_actor_id
+        )
+        if self.inventory_reads == 1:
+            hidden.is_alive = False
+            return [
+                actor for actor in self.actors
+                if actor.id != self.hidden_actor_id
+            ]
+        hidden.is_alive = True
+        return list(self.actors)
+
+
 def valid_document():
     physics = vehicle_physics_to_dict(FakePhysics())
     return {
@@ -481,6 +505,31 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual("unknown", actor.control["source"])
         self.assertEqual(ConfigurationStatus.PARTIAL,
                          actor.completeness.status)
+
+    def test_capture_reads_current_actor_physics_not_stale_registry_cache(self):
+        vehicle = FakeActor(2, "vehicle.test")
+        world = FakeWorld([vehicle])
+        self.synchronizer.synchronize(world, self.database)
+        with self.database.lock:
+            self.database.adopt_runtime_actor(
+                vehicle.id,
+                vehicle,
+                ActorCategory.VEHICLE,
+                ActorOrigin.ADOPTED_EXTERNAL,
+            )
+            self.database.actors_db.actors_db[vehicle.id].physics_control = (
+                SimpleNamespace(mass=9999.0)
+            )
+        vehicle.physics.mass = 725.0
+        vehicle.physics.forward_gears = [
+            SimpleNamespace(ratio=4.2, down_ratio=0.3, up_ratio=0.7)
+        ]
+
+        document = self.capture.capture(world, self.database, "New model")
+
+        actor = document.actors[0]
+        self.assertEqual(725.0, actor.physics["mass"])
+        self.assertEqual(4.2, actor.physics["forward_gears"][0]["ratio"])
 
     def test_external_parent_and_sensor_are_outside_capture_scope(self):
         vehicle = FakeActor(10, "vehicle.test", FakeTransform(x=10.0))
@@ -790,13 +839,82 @@ class ScenarioManagerTests(unittest.TestCase):
                 path,
                 "json",
                 synchronize=synchronize,
+                server_version="0.9.15",
             )
             document = ScenarioSerializer.read(path)
 
         self.assertTrue(result["success"])
         self.assertEqual(1, result["saved"])
+        self.assertEqual("0.9.15", document["metadata"]["carla_version"])
+        self.assertEqual(
+            "/Game/Carla/Maps/Town03",
+            document["world"]["map"],
+        )
         self.assertEqual(15.0, document["actors"][0]["transform"]["location"]["x"])
         ScenarioValidator().validate(document)
+
+    def test_loaded_actor_remains_managed_through_lagging_sync_and_resave(self):
+        loaded = FakeActor(200, "vehicle.test", FakeTransform(x=20.0))
+        external = FakeActor(201, "vehicle.test", FakeTransform(x=21.0))
+        world = LaggingLoadedActorWorld(
+            [loaded, external],
+            hidden_actor_id=loaded.id,
+            world_id=15,
+        )
+        database = DataStorage()
+        database.world_id = world.id
+        database.world_generation = 4
+        database.add_actor(
+            loaded,
+            "Loaded vehicle",
+            world_id=world.id,
+            ownership=ActorOwnership.MANAGED,
+            origin=ActorOrigin.SCENARIO_LOADED,
+        )
+        synchronizer = WorldSynchronizer()
+
+        after_load = synchronizer.synchronize(
+            world,
+            database,
+            reason="after_load_scenario",
+        )
+
+        loaded_info = database.actors_db.actors_db[loaded.id]
+        external_info = database.actors_db.actors_db[external.id]
+        self.assertEqual(0, after_load.removed)
+        self.assertEqual(ActorOwnership.MANAGED, loaded_info.ownership)
+        self.assertEqual(ActorOrigin.SCENARIO_LOADED, loaded_info.origin)
+        self.assertEqual(world.id, loaded_info.world_id)
+        self.assertEqual(ActorOwnership.EXTERNAL, external_info.ownership)
+        self.assertEqual(4, database.world_generation)
+
+        def synchronize(current_world, reason, publish):
+            self.assertEqual("before_save", reason)
+            self.assertFalse(publish)
+            return synchronizer.synchronize(
+                current_world,
+                database,
+                reason=reason,
+            ).to_dict()
+
+        with tempfile.TemporaryDirectory() as directory:
+            result = ScenarioManager().save(
+                world,
+                database,
+                set(),
+                "Loaded again",
+                Path(directory) / "loaded-again.json",
+                "json",
+                synchronize=synchronize,
+                server_version="0.9.15",
+            )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(1, result["saved"])
+        self.assertEqual(1, result["skipped_external"])
+        self.assertTrue(database.is_actor_managed(loaded.id))
+        self.assertFalse(database.is_actor_managed(external.id))
+        self.assertEqual(4, database.world_generation)
 
 
 if __name__ == "__main__":

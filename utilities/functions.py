@@ -125,6 +125,15 @@ def parse_weather_to_carla(weather: Dict[str, object]) -> carla.WeatherParameter
             setattr(carla_weather, key, value)
     return carla_weather
 
+
+def weather_parameter_presets(weather_parameters_type):
+    """Return only real preset instances exposed by WeatherParameters."""
+    return {
+        name: value
+        for name, value in vars(weather_parameters_type).items()
+        if isinstance(value, weather_parameters_type)
+    }
+
 def wait_and_try(condition, timeout=10, interval=1):
     start = time.time()
     while time.time() - start < timeout:

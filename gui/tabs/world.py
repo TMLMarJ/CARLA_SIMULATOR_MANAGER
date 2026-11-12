@@ -6,6 +6,7 @@ from PIL import Image, ImageDraw, ImageOps, ImageTk
 
 from preview.map import MapPreviewCache
 from utilities.functions import parse_weather_to_dict, parse_weather_to_carla
+from utilities.map_names import visible_map_names
 import messagebox
 
 class CustomWorldAndWeatherFrame(tk.Frame):
@@ -68,8 +69,10 @@ class CustomWorldAndWeatherFrame(tk.Frame):
         self.selected_map = tk.StringVar()
         select_map_combobox = ttk.Combobox(self.world_control_frame_selection, width=27,
                                            textvariable=self.selected_map)
-        select_map_combobox["values"] = list(self.database.world_lib)[:-1]
-        select_map_combobox.current(0)
+        visible_maps = visible_map_names(self.database.world_lib)
+        select_map_combobox["values"] = visible_maps
+        if visible_maps:
+            select_map_combobox.current(0)
         select_map_combobox.grid(row=2, column=0, sticky="ew")
         select_map_combobox.bind("<<ComboboxSelected>>", self.update_image)
 
@@ -168,8 +171,10 @@ class CustomWorldAndWeatherFrame(tk.Frame):
             width=27,
             textvariable=self.selected_weather_preset
         )
-        select_weather_preset_combobox["values"] = list(self.weather_presets_data.keys())[:-1]
-        select_weather_preset_combobox.current(0)
+        weather_preset_names = list(self.weather_presets_data.keys())
+        select_weather_preset_combobox["values"] = weather_preset_names
+        if weather_preset_names:
+            select_weather_preset_combobox.current(0)
         select_weather_preset_combobox.grid(row=1, column=1, sticky="w", padx=(0, 8), pady=(0, 6))
         select_weather_preset_combobox.bind("<<ComboboxSelected>>", self.update_weather_variables)
 

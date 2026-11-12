@@ -79,7 +79,7 @@ class WorldSyncReport:
 class ScenarioMetadata:
     name: str
     created_at: str
-    carla_version: str = "0.9.16"
+    carla_version: str
     application_version: str | None = None
 
 

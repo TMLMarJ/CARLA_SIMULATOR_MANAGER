@@ -251,7 +251,14 @@ class WorldSynchronizer:
 
     @staticmethod
     def _include_fresh_loaded_actors(actors, database, world_id):
-        """Keep just-spawned Load records during CARLA inventory propagation."""
+        """Keep just-spawned Load records during CARLA inventory propagation.
+
+        This is called only by the immediate post-Load synchronization.  The
+        registration itself proves that these exact runtime IDs were created
+        by the current Load.  CARLA 0.9.15 may briefly omit such an actor from
+        ``get_actors()`` and report ``is_alive=False`` on its returned proxy,
+        so that transient flag must not erase the ownership record.
+        """
         visible_ids = {
             ActorClassifier.actor_id(actor)
             for actor in actors
@@ -281,12 +288,6 @@ class WorldSynchronizer:
                         registered.append(actor)
 
         for actor in registered:
-            try:
-                alive = bool(actor.is_alive)
-            except (AttributeError, RuntimeError):
-                alive = False
-            if not alive:
-                continue
             runtime_id = ActorClassifier.actor_id(actor)
             if runtime_id is None or runtime_id in visible_ids:
                 continue

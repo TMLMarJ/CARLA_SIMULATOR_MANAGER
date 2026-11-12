@@ -14,6 +14,7 @@ from models.scenarios import (
     DataSource,
 )
 from scenarios.cleaner import ClearMode
+from utilities.sensor_attachments import resolve_attachment_type
 
 
 class StaleLoadPlanError(RuntimeError):
@@ -344,6 +345,7 @@ class ScenarioRestorer:
                     data,
                     runtime_by_scenario.get(parent_id),
                     spawn_warnings,
+                    self._world_id(world),
                 )
                 runtime_by_scenario[scenario_id] = actor
                 report.restored += 1
@@ -448,18 +450,11 @@ class ScenarioRestorer:
             transform = self._spawn_transform(data)
             kwargs = {}
             if parent is not None:
-                attachment_name = data.get("attachment_type")
-                if attachment_name not in (
-                    "Rigid", "SpringArm", "SpringArmGhost"
-                ):
-                    attachment_name = "Rigid"
-                    warnings.append(
-                        "Unknown attachment type; Rigid fallback was used."
-                    )
+                attachment_name = data.get("attachment_type") or "Rigid"
                 kwargs = {
                     "attach_to": parent,
-                    "attachment_type": getattr(
-                        self.carla.AttachmentType,
+                    "attachment_type": resolve_attachment_type(
+                        self.carla,
                         attachment_name,
                     ),
                 }
@@ -507,11 +502,12 @@ class ScenarioRestorer:
             transform.location.z += self.VEHICLE_SPAWN_Z_OFFSET
         return transform
 
-    def _register_actor(self, database, actor, data, parent, runtime_warnings):
+    def _register_actor(self, database, actor, data, parent, runtime_warnings,
+                        world_id):
         completeness = data["completeness"]
         metadata = {
             "scenario_id": data["scenario_id"],
-            "world_id": int(actor.get_world().id),
+            "world_id": int(world_id),
             "ownership": ActorOwnership.MANAGED,
             "origin": ActorOrigin.SCENARIO_LOADED,
             "category": data["category"],

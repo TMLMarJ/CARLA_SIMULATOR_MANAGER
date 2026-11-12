@@ -39,6 +39,7 @@ from services.blueprints import BlueprintService
 from services.sensors import SensorService
 from services.weather import apply_weather
 from services.world import WorldService
+from utilities.sensor_attachments import resolve_attachment_type
 
 class CarlaController(MovementRuntime, SimulationRuntime, ScenarioRuntime):
     TICK_TIMEOUT_SECONDS = 5.0
@@ -196,7 +197,8 @@ class CarlaController(MovementRuntime, SimulationRuntime, ScenarioRuntime):
     def _record_actor_operation_result(self, operation, blueprint_id,
                                        actor=None, error=None,
                                        previous_actor_id=None, request_id=None,
-                                       warnings=None, sensor_id_map=None):
+                                       warnings=None, sensor_id_map=None,
+                                       user_name=None):
         result = {
             "operation": operation,
             "success": error is None,
@@ -210,6 +212,7 @@ class CarlaController(MovementRuntime, SimulationRuntime, ScenarioRuntime):
             "request_id": request_id,
             "warnings": list(warnings or []),
             "sensor_id_map": dict(sensor_id_map or {}),
+            "user_name": user_name,
         }
         with self.database.lock:
             self.database.actor_operation_result = result
@@ -319,6 +322,7 @@ class CarlaController(MovementRuntime, SimulationRuntime, ScenarioRuntime):
         )
         context.world = None
         context.blueprint_library = None
+        operation_stage = "activate_map"
 
         try:
             self._tm_debug_event(
@@ -336,10 +340,13 @@ class CarlaController(MovementRuntime, SimulationRuntime, ScenarioRuntime):
                 world=new_world,
                 map_name=map_name,
             )
+            operation_stage = "blueprint_library"
             context.world = new_world
             context.blueprint_library = new_world.get_blueprint_library()
+            operation_stage = "map_infrastructure"
             self._capture_map_infrastructure(new_world)
 
+            operation_stage = "install_world_state"
             new_settings = self.world_service.install(
                 context,
                 self.simulation_manager,
@@ -349,6 +356,7 @@ class CarlaController(MovementRuntime, SimulationRuntime, ScenarioRuntime):
                 world=new_world,
                 map_name=map_name,
             )
+            operation_stage = "dashboard_and_synchronization"
             self.dashboard_monitor.reset_world(
                 self.database,
                 new_world,
@@ -374,7 +382,12 @@ class CarlaController(MovementRuntime, SimulationRuntime, ScenarioRuntime):
             self._publish_simulation_control_state(force=True)
             self._queue_map_preview_generation(new_world)
         except Exception as error:
-            error_message = str(error)
+            error_message = (
+                "World change failed "
+                f"[stage={operation_stage}, map='{map_name}', "
+                f"previous_episode={previous_world_id}, "
+                f"error={type(error).__name__}]: {error}"
+            )
             try:
                 (
                     recovered_world,
@@ -510,11 +523,9 @@ class CarlaController(MovementRuntime, SimulationRuntime, ScenarioRuntime):
                 )
             weather = world.get_weather()
             weather_data = parse_weather_to_dict(weather)
-            weather_presets = {
-                name: value
-                for name, value in vars(carla.WeatherParameters).items()
-                if isinstance(value, carla.WeatherParameters)
-            }
+            weather_presets = weather_parameter_presets(
+                carla.WeatherParameters
+            )
             self.database.weather_presets = weather_presets
             self.database.actual_weather_data = weather_data
             self.database.world_lib = self.client.get_available_maps()
@@ -1171,18 +1182,15 @@ class CarlaController(MovementRuntime, SimulationRuntime, ScenarioRuntime):
                     blueprint_id = data["blueprint_id"]
                     actor_id = data["actor_id"]
                     blueprint_attributes = data.get("attributes")
-                    requested_physics = data.get("physics")
                     request_id = data.get("request_id")
                 else:
                     blueprint_id, actor_id = data
                     blueprint_attributes = None
-                    requested_physics = None
                     request_id = None
                 requested_blueprint_id = str(blueprint_id)
                 actor_id = int(actor_id)
                 old_actor = None
                 new_actor = None
-                new_sensors = []
                 old_actor_removed = False
                 warnings = []
                 sensor_id_map = {}
@@ -1224,11 +1232,6 @@ class CarlaController(MovementRuntime, SimulationRuntime, ScenarioRuntime):
                         "parent_scenario_id": actor_info.parent_scenario_id,
                         "data_sources": dict(actor_info.data_sources),
                     }
-                    preserved_physics = (
-                        old_actor.get_physics_control()
-                        if old_actor.type_id.startswith("vehicle.")
-                        else None
-                    )
                     with self.database.lock:
                         attached_sensors = [
                             (
@@ -1285,62 +1288,16 @@ class CarlaController(MovementRuntime, SimulationRuntime, ScenarioRuntime):
                         try_spawn=False,
                         attributes=blueprint_attributes,
                     )
-                    physics = (
-                        requested_physics
-                        if requested_physics is not None
-                        else preserved_physics
-                    )
                     actual_physics = None
-                    if physics is not None and new_actor.type_id.startswith("vehicle."):
+                    if new_actor.type_id.startswith("vehicle."):
                         try:
-                            actual_physics = self._apply_vehicle_physics_checked(
-                                new_actor,
-                                physics,
-                            )
-                        except Exception as physics_error:
                             actual_physics = new_actor.get_physics_control()
+                        except Exception as physics_error:
                             warnings.append(
-                                "Physics from the previous vehicle was incompatible "
-                                "with the selected model; CARLA defaults were kept: "
+                                "CARLA created the replacement vehicle, but its "
+                                "default physics could not be read for the GUI: "
                                 f"{physics_error}"
                             )
-
-                    for old_sensor_id, old_sensor, sensor_info in attached_sensors:
-                        sensor_blueprint = self._find_blueprint_checked(
-                            blueprint_library,
-                            sensor_info.blueprint_id,
-                        )
-                        for attribute_name, attribute_value in (
-                            sensor_info.blueprint_attributes.items()
-                        ):
-                            if sensor_blueprint.has_attribute(attribute_name):
-                                attribute = sensor_blueprint.get_attribute(attribute_name)
-                                if attribute.is_modifiable:
-                                    sensor_blueprint.set_attribute(
-                                        attribute_name,
-                                        str(attribute_value),
-                                    )
-                        attachment = getattr(
-                            carla.AttachmentType,
-                            str(sensor_info.attachment_type),
-                            carla.AttachmentType.Rigid,
-                        )
-                        new_sensor = world.spawn_actor(
-                            sensor_blueprint,
-                            sensor_info.relative_transform,
-                            attach_to=new_actor,
-                            attachment_type=attachment,
-                        )
-                        if new_sensor is None:
-                            raise RuntimeError(
-                                f"Could not restore attached sensor {old_sensor_id}."
-                            )
-                        new_sensors.append((
-                            old_sensor_id,
-                            old_sensor,
-                            new_sensor,
-                            sensor_info,
-                        ))
 
                     with self.database.lock:
                         new_actor_info = self.database.add_actor(
@@ -1350,30 +1307,15 @@ class CarlaController(MovementRuntime, SimulationRuntime, ScenarioRuntime):
                         )
                         if actual_physics is not None:
                             new_actor_info.physics_control = actual_physics
-                        for old_sensor_id, _, new_sensor, sensor_info in new_sensors:
-                            self.database.add_sensor(
-                                new_sensor,
-                                new_actor.id,
-                                sensor_info.user_name,
-                                sensor_info.blueprint_id,
-                                sensor_info.relative_transform,
-                                sensor_info.blueprint_attributes,
-                                scenario_id=sensor_info.scenario_id,
-                                ownership=sensor_info.ownership,
-                                origin=sensor_info.origin,
-                                configuration_status=sensor_info.configuration_status,
-                                missing_fields=list(sensor_info.missing_fields),
-                                warnings=list(sensor_info.warnings),
-                                parent_scenario_id=sensor_info.parent_scenario_id,
-                                attachment_type=sensor_info.attachment_type,
-                                data_sources=dict(sensor_info.data_sources),
-                            )
-                            sensor_id_map[old_sensor_id] = new_sensor.id
                         self.database.spawned_actor_id = new_actor.id
-                    if sensor_id_map:
+                    removed_sensor_ids = [
+                        old_sensor_id
+                        for old_sensor_id, _, _ in attached_sensors
+                    ]
+                    if removed_sensor_ids:
                         self.database.sensor_event_queue.put((
-                            "sensors_replaced",
-                            sensor_id_map,
+                            "sensors_cleared",
+                            removed_sensor_ids,
                         ))
                     self._record_actor_operation_result(
                         "change_model",
@@ -1385,12 +1327,6 @@ class CarlaController(MovementRuntime, SimulationRuntime, ScenarioRuntime):
                         sensor_id_map=sensor_id_map,
                     )
                 except Exception as error:
-                    for _, _, new_sensor, _ in new_sensors:
-                        try:
-                            if new_sensor.is_alive:
-                                new_sensor.destroy()
-                        except Exception:
-                            pass
                     if new_actor is not None:
                         with self.database.lock:
                             new_actor_is_registered = (
@@ -1426,6 +1362,19 @@ class CarlaController(MovementRuntime, SimulationRuntime, ScenarioRuntime):
             if cmd == "attach_sensor":
                 sensor = None
                 try:
+                    attachment_name = str(
+                        data.get("attachment_type") or "Rigid"
+                    )
+                    attachment_type = resolve_attachment_type(
+                        carla,
+                        attachment_name,
+                    )
+                    resolved_name = (
+                        self.database.resolve_unique_managed_name(
+                            data.get("name"),
+                            "Sensor",
+                        )
+                    )
                     parent_id = data["parent_id"]
                     with self.database.lock:
                         parent_actor = self.database.actors_db.actors.get(parent_id)
@@ -1443,7 +1392,7 @@ class CarlaController(MovementRuntime, SimulationRuntime, ScenarioRuntime):
                         sensor_blueprint,
                         data["transform"],
                         attach_to=parent_actor,
-                        attachment_type=carla.AttachmentType.Rigid
+                        attachment_type=attachment_type,
                     )
                     if sensor is None:
                         raise RuntimeError("CARLA did not create the sensor.")
@@ -1452,14 +1401,15 @@ class CarlaController(MovementRuntime, SimulationRuntime, ScenarioRuntime):
                         self.database.add_sensor(
                             sensor,
                             parent_id,
-                            data["name"],
+                            resolved_name,
                             data["blueprint_id"],
                             data["transform"],
-                            data["attributes"]
+                            data["attributes"],
+                            attachment_type=attachment_name,
                         )
                     self.sensor_status_errors.pop(sensor.id, None)
                     self.database.sensor_event_queue.put(("sensor_attached", sensor.id))
-                    print(f"Sensor {data['name']} spawned with ID {sensor.id}")
+                    print(f"Sensor {resolved_name} spawned with ID {sensor.id}")
                 except Exception as e:
                     self.dashboard_monitor.record_error(e)
                     if sensor is not None:
@@ -2382,7 +2332,6 @@ class CarlaController(MovementRuntime, SimulationRuntime, ScenarioRuntime):
             "blueprint_id": blueprint_id,
             "actor_id": int(actor_id),
             "attributes": attributes,
-            "physics": physics,
             "request_id": request_id,
         }))
         return True

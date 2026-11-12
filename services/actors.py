@@ -1,7 +1,10 @@
 from services.blueprints import BlueprintService
+from utilities.logical_names import default_logical_name
 
 
 class ActorService:
+    PEDESTRIAN_COLLISION_Z_OFFSET = 2.0
+
     def __init__(self, database, blueprint_service=None):
         self.database = database
         self.blueprints = blueprint_service or BlueprintService()
@@ -17,6 +20,23 @@ class ActorService:
 
         spawn = world.try_spawn_actor if try_spawn else world.spawn_actor
         actor = spawn(blueprint, transform)
+        if (
+            actor is None
+            and try_spawn
+            and requested_id.startswith("walker.pedestrian.")
+        ):
+            fallback_transform = self._pedestrian_collision_transform(
+                transform,
+            )
+            try:
+                actor = world.spawn_actor(blueprint, fallback_transform)
+            except Exception as error:
+                raise RuntimeError(
+                    "CARLA rejected pedestrian spawn after the single "
+                    "collision fallback "
+                    f"(Z +{self.PEDESTRIAN_COLLISION_Z_OFFSET:.1f} m): "
+                    f"{error}"
+                ) from error
         if actor is None:
             raise RuntimeError(
                 f"CARLA could not spawn blueprint '{requested_id}'."
@@ -33,6 +53,29 @@ class ActorService:
                     f"'{requested_id}', created '{actual_id}'."
                 )
         return actor
+
+    @classmethod
+    def _pedestrian_collision_transform(cls, transform):
+        """Copy a CARLA transform and raise only its location by 2 metres."""
+        try:
+            location = transform.location
+            rotation = transform.rotation
+            return type(transform)(
+                type(location)(
+                    x=float(location.x),
+                    y=float(location.y),
+                    z=float(location.z) + cls.PEDESTRIAN_COLLISION_Z_OFFSET,
+                ),
+                type(rotation)(
+                    pitch=float(rotation.pitch),
+                    yaw=float(rotation.yaw),
+                    roll=float(rotation.roll),
+                ),
+            )
+        except (AttributeError, TypeError, ValueError) as error:
+            raise RuntimeError(
+                "Could not build the pedestrian collision fallback transform."
+            ) from error
 
     @staticmethod
     def replacement_attributes(actor_info, requested_attributes):
@@ -138,7 +181,12 @@ class ActorService:
         requested_physics = data.get("physics", default_physics)
         self.database.blueprint_new_data = None
         actor = None
+        stage = "blueprint_and_spawn"
         try:
+            resolved_name = self.database.resolve_unique_managed_name(
+                data.get("name"),
+                default_logical_name(requested_blueprint_id),
+            )
             actor = self.spawn_checked(
                 context.world,
                 context.blueprint_library,
@@ -147,6 +195,7 @@ class ActorService:
                 attributes=blueprint_attributes,
             )
             actual_physics = None
+            stage = "physics"
             if (
                 requested_physics is not None
                 and actor.type_id.startswith("vehicle.")
@@ -155,8 +204,17 @@ class ActorService:
                     actor,
                     requested_physics,
                 )
+            stage = "registration"
+            try:
+                active_world_id = int(context.world.id)
+            except (AttributeError, RuntimeError, TypeError, ValueError):
+                active_world_id = None
             with self.database.lock:
-                actor_info = self.database.add_actor(actor, data["name"])
+                actor_info = self.database.add_actor(
+                    actor,
+                    resolved_name,
+                    world_id=active_world_id,
+                )
                 if actual_physics is not None:
                     actor_info.physics_control = actual_physics
                 self.database.spawned_actor_id = actor.id
@@ -165,8 +223,19 @@ class ActorService:
                 requested_blueprint_id,
                 actor=actor,
                 request_id=request_id,
+                user_name=resolved_name,
             )
         except Exception as error:
+            episode = None
+            try:
+                episode = int(context.world.id)
+            except (AttributeError, RuntimeError, TypeError, ValueError):
+                pass
+            diagnostic_error = RuntimeError(
+                "Actor spawn failed "
+                f"[stage={stage}, blueprint='{requested_blueprint_id}', "
+                f"episode={episode}, error={type(error).__name__}]: {error}"
+            )
             if actor is not None:
                 with self.database.lock:
                     actor_is_registered = (
@@ -180,7 +249,7 @@ class ActorService:
             result_callback(
                 "spawn",
                 requested_blueprint_id,
-                error=error,
+                error=diagnostic_error,
                 request_id=request_id,
             )
 

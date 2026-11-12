@@ -218,6 +218,13 @@ class ScenarioRuntime:
                     raise RuntimeError(
                         "Scenario save cancelled during disconnect."
                     )
+                try:
+                    server_version = self.client.get_server_version()
+                except Exception as error:
+                    raise RuntimeError(
+                        "Could not determine the CARLA server version; "
+                        "scenario was not saved."
+                    ) from error
                 result = self.scenario_manager.save(
                     world,
                     self.database,
@@ -227,6 +234,7 @@ class ScenarioRuntime:
                     data["format"],
                     synchronize=self._perform_world_sync,
                     cancel_check=self.shutdown_event.is_set,
+                    server_version=server_version,
                 )
                 self.database.scenario_event_queue.put((
                     "scenario_save_completed",
@@ -445,22 +453,37 @@ class ScenarioRuntime:
         self.cleanup_preview()
         self.simulation_manager.stop_local_ticks()
         self._publish_simulation_control_state(force=True)
-        map_name = self.scenario_manager.loader.map_key(target_map)
         self.client.set_timeout(30.0)
         new_world = None
         new_library = None
+        operation_stage = "traffic_manager_shutdown"
         try:
             self._shutdown_exclusive_traffic_manager(
                 "scenario_load",
                 strict=True,
             )
             self._invalidate_traffic_manager_reference()
+            operation_stage = "resolve_map"
             self._tm_debug_event(
                 "scenario_load_world_rpc_begin",
                 world=current_world,
-                map_name=map_name,
+                map_name=str(target_map),
             )
-            new_world = self.client.load_world(map_name)
+            available_maps = self.client.get_available_maps()
+            map_name = self.scenario_manager.loader.resolve_map(
+                target_map,
+                available_maps,
+            )
+            if map_name is None:
+                raise RuntimeError(
+                    f"Target map '{target_map}' is not available on the server."
+                )
+            operation_stage = "activate_map"
+            new_world = self.world_service.load_with_retry(
+                self.client,
+                map_name,
+                self.shutdown_event,
+            )
             self._tm_debug_event(
                 "scenario_load_world_rpc_complete",
                 world=new_world,
@@ -473,19 +496,24 @@ class ScenarioRuntime:
                 raise RuntimeError(
                     f"CARLA did not load target map '{target_map}'."
                 )
+            operation_stage = "blueprint_library"
             new_library = new_world.get_blueprint_library()
+            operation_stage = "map_infrastructure"
             self._capture_map_infrastructure(new_world)
+            operation_stage = "world_settings"
             settings = self.simulation_manager.get_current_settings(new_world)
             self.simulation_manager.settings_changed(
                 settings,
                 preserve_activity=False,
             )
             weather_data = parse_weather_to_dict(new_world.get_weather())
+            operation_stage = "server_metadata"
             available_maps = self.client.get_available_maps()
             try:
                 server_version = self.client.get_server_version()
             except Exception:
                 server_version = None
+            operation_stage = "install_world_state"
             with self.database.lock:
                 self.database.actors_db.clear()
                 self.database.sensors_db.clear()
@@ -527,10 +555,15 @@ class ScenarioRuntime:
                 server_version,
             )
         except Exception as error:
+            diagnostic_error = RuntimeError(
+                "Scenario Load world change failed "
+                f"[stage={operation_stage}, map='{target_map}', "
+                f"error={type(error).__name__}]: {error}"
+            )
             if new_world is not None:
-                error.changed_world = new_world
-                error.blueprint_library = new_library
-            raise
+                diagnostic_error.changed_world = new_world
+                diagnostic_error.blueprint_library = new_library
+            raise diagnostic_error from error
         finally:
             self.client.set_timeout(5.0)
 

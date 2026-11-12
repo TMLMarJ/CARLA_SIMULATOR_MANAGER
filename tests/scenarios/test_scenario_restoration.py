@@ -4,12 +4,15 @@ import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 from core.state_store import DataStorage
+from models.scenarios import ActorOrigin, ActorOwnership
 from scenarios.cleaner import WorldCleaner
 from scenarios.loader import ScenarioLoader
 from scenarios.restorer import ScenarioRestorer
 from scenarios.serialization import ScenarioSerializer
+from scenarios.synchronization import WorldSynchronizer
 from scenarios.validation import ScenarioValidator
 from tests.scenarios.test_scenario_serialization import FakePhysics, UUID_2, valid_document
 
@@ -279,6 +282,36 @@ class ScenarioRestorationTests(unittest.TestCase):
         self.assertEqual(valid_document()["actors"][0]["scenario_id"], info.scenario_id)
         self.assertEqual("managed", info.ownership)
         self.assertEqual("scenario_loaded", info.origin)
+
+    def test_load_registration_uses_active_episode_and_keeps_external_actor(self):
+        world = World(15, "Town03", library())
+        loaded = Actor(100, "vehicle.test", world)
+        external = Actor(101, "vehicle.test", world)
+        world.actors.extend((loaded, external))
+        loaded.get_world = mock.Mock(
+            side_effect=RuntimeError("stale actor world proxy")
+        )
+        data = valid_document()["actors"][0]
+
+        self.restorer._register_actor(
+            self.database,
+            loaded,
+            data,
+            None,
+            [],
+            world.id,
+        )
+        WorldSynchronizer().synchronize(
+            world,
+            self.database,
+            reason="after_load_scenario",
+        )
+
+        loaded_info = self.database.actors_db.actors_db[loaded.id]
+        external_info = self.database.actors_db.actors_db[external.id]
+        self.assertEqual(ActorOwnership.MANAGED, loaded_info.ownership)
+        self.assertEqual(ActorOrigin.SCENARIO_LOADED, loaded_info.origin)
+        self.assertEqual(ActorOwnership.EXTERNAL, external_info.ownership)
 
     def test_map_change_revalidates_target_blueprints(self):
         old_world = World(1, "Town03", Library([]))

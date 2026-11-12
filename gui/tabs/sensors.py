@@ -15,6 +15,7 @@ from gui.windows.sensor_preview import (
     SpatialSensorPreviewTop
 )
 from utilities.functions import actor_ownership_status, hex_to_rgb, rgb_to_hex
+from utilities.sensor_attachments import ATTACHMENT_TYPE_NAMES
 
 
 class CustomSensorFrame(tk.Frame):
@@ -46,6 +47,7 @@ class CustomSensorFrame(tk.Frame):
             "Type",
             "Parent",
             "Transform",
+            "Attachment",
             "Status",
             "Ownership",
         )
@@ -65,6 +67,7 @@ class CustomSensorFrame(tk.Frame):
             "Type": (185, 150, True),
             "Parent": (135, 110, True),
             "Transform": (285, 240, True),
+            "Attachment": (110, 95, False),
             "Status": (75, 70, False),
             "Ownership": (85, 80, False),
         }
@@ -136,18 +139,12 @@ class CustomSensorFrame(tk.Frame):
         entry.select_range(0, tk.END)
 
         def save(event=None):
-            new_name = entry.get().strip()
-            if not new_name:
-                messagebox.showerror(
-                    "Invalid sensor name",
-                    "Sensor name cannot be empty.",
-                    parent=self,
-                )
-                entry.focus()
-                return
             sensor_id = int(self.tree.item(row)["values"][1])
             try:
-                new_name = self.database.rename_sensor(sensor_id, new_name)
+                new_name = self.database.rename_sensor(
+                    sensor_id,
+                    entry.get(),
+                )
             except (KeyError, ValueError) as error:
                 messagebox.showerror(
                     "Rename sensor",
@@ -293,6 +290,7 @@ class CustomSensorFrame(tk.Frame):
                     sensor_info.blueprint_id,
                     parent,
                     transform_text,
+                    sensor_info.attachment_type or "Unknown",
                     status,
                     ownership,
                 ))
@@ -442,6 +440,7 @@ class AddSensorTop(tk.Toplevel):
         self.sensor_name_var = tk.StringVar(value="Sensor")
         self.parent_var = tk.StringVar()
         self.blueprint_var = tk.StringVar()
+        self.attachment_type_var = tk.StringVar(value="Rigid")
         self.transform_vars = {
             "x": tk.DoubleVar(value=0.0),
             "y": tk.DoubleVar(value=0.0),
@@ -529,6 +528,16 @@ class AddSensorTop(tk.Toplevel):
         blueprint_combobox.bind("<<ComboboxSelected>>", self._update_attributes)
         if sensor_blueprints:
             blueprint_combobox.current(0)
+
+        ttk.Label(basic_frame, text="Attachment Type").grid(
+            row=3, column=0, sticky="w", padx=8, pady=6
+        )
+        ttk.Combobox(
+            basic_frame,
+            textvariable=self.attachment_type_var,
+            values=ATTACHMENT_TYPE_NAMES,
+            state="readonly",
+        ).grid(row=3, column=1, sticky="ew", padx=8, pady=6)
 
         self.attributes_frame = ttk.LabelFrame(
             self.content_frame,
@@ -650,10 +659,10 @@ class AddSensorTop(tk.Toplevel):
         name = self.sensor_name_var.get().strip()
         parent_value = self.parent_var.get()
         blueprint_id = self.blueprint_var.get()
-        if not name or parent_value not in self.parent_values or not blueprint_id:
+        if parent_value not in self.parent_values or not blueprint_id:
             messagebox.showerror(
                 "Invalid sensor data",
-                "Enter a name and select a parent actor and sensor blueprint.",
+                "Select a parent actor and sensor blueprint.",
                 parent=self
             )
             return
@@ -686,7 +695,8 @@ class AddSensorTop(tk.Toplevel):
             "parent_id": self.parent_values[parent_value],
             "blueprint_id": blueprint_id,
             "transform": transform,
-            "attributes": attributes
+            "attributes": attributes,
+            "attachment_type": self.attachment_type_var.get(),
         })
         self.destroy()
 

@@ -557,6 +557,10 @@ class CustomPedestrianFrame(tk.Frame):
             else:
                 actor_data["carla_id"] = actor_id
                 actor_data["type_id"] = actor.type_id
+                actor_data["name"] = (
+                    result.get("user_name")
+                    or self.database.actors_db.actors_db[actor_id].user_name
+                )
                 actor_data["status"] = "Managed"
                 self.actor_table.add_actor_to_table(actor_data)
                 with self.database.lock:
@@ -734,15 +738,21 @@ class ActorTable(ttk.Frame):
         entry.select_range(0, tk.END)
 
         def save(event=None):
-            new_value = entry.get()
             try:
-                new_value = str(new_value)
-            except ValueError:
+                actor_id = int(self.tree.item(row)["values"][1])
+                new_value = self.controller.database.rename_actor(
+                    actor_id,
+                    entry.get(),
+                )
+            except (KeyError, ValueError) as error:
+                messagebox.showerror(
+                    "Rename pedestrian",
+                    str(error),
+                    parent=self,
+                )
                 entry.destroy()
                 return
             self.tree.set(row, column, new_value)
-            actor_id = self.tree.item(row)["values"][1]
-            self.controller.database.actors_db.actors_db[actor_id].user_name = new_value
             entry.destroy()
 
         entry.bind("<Return>", save)
