@@ -10,3 +10,4 @@ tester_function.ipynb
 
 __pycache__/
 *.py[cod]
+*.pyc
