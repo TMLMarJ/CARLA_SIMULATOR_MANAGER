@@ -44,8 +44,8 @@ flowchart LR
 | Stan ruchu zarządzanego | kontroler i rzeczywisty aktor CARLA | `vehicle_control_states`, `walker_ai_states` | Dla aktora external stan może być oznaczony jako nieznany. |
 | Stan kontroli symulacji | `SimulationManager` oraz CARLA settings/frame | `simulation_control_state` | Migawka jest publikowana do GUI. |
 | Dashboard | wyliczenia `SimulationDashboardMonitor` | cztery słowniki snapshotów w `DataStorage` | Dane pochodne, nie źródło do mutacji świata. |
-| Scenariusz na dysku | plik JSON/YAML | `ScenarioDocument`/słowniki | Przy Load plik opisuje stan docelowy, ale podlega preflight i ponownej walidacji. |
-| Podgląd mapy | geometria `carla.Map` | PNG w `resources/maps/generated/` | Cache jest pochodny; stary `images/maps/generated/` pozostaje źródłem odczytu zgodności. |
+| Konfiguracja na dysku | plik JSON/YAML | `ScenarioDocument`/słowniki | Przy Load Configuration plik opisuje stan docelowy, ale podlega preflight i ponownej walidacji. |
+| Podgląd mapy | geometria `carla.Map` | PNG w per-user LocalAppData/XDG Cache | Cache jest pochodny; dawne katalogi projektu pozostają źródłem odczytu zgodności. |
 
 ## `DataStorage`
 
@@ -94,7 +94,7 @@ Przepływ przykładowej kamery:
 
 Pozostałe bufory obsługują wartości, zdarzenia (np. collision) oraz chmury punktów LiDAR/radar. Dane są ulotne i nie trafiają do pliku scenariusza.
 
-## Dane scenariusza
+## Dane Configuration Management
 
 Implementacja przepływu jest rozdzielona między `scenarios.runtime` (orkiestracja w workerze) oraz `scenarios.capture`, `scenarios.validation`, `scenarios.serialization`, `scenarios.loader`, `scenarios.restorer`, `scenarios.cleaner`, `scenarios.synchronization` i `scenarios.adoption`. Typy dokumentu znajdują się w `models.scenarios`.
 
@@ -105,11 +105,11 @@ Implementacja przepływu jest rozdzielona między `scenarios.runtime` (orkiestra
 - listę `ScenarioActor`;
 - raport capture.
 
-Każdy aktor scenariusza może zawierać trwałe `scenario_id`, kategorię, nazwę, blueprint, transformację, atrybuty blueprintu, źródła danych, completeness, parent `scenario_id`, attachment, fizykę pojazdu i dane sterowania — zależnie od kategorii i dostępności informacji.
+Każdy aktor zapisanej konfiguracji może zawierać trwałe `scenario_id`, kategorię, nazwę, blueprint, transformację, atrybuty blueprintu, źródła danych, completeness, parent `scenario_id`, attachment, fizykę pojazdu i dane sterowania — zależnie od kategorii i dostępności informacji. `scenario_id` jest zachowaną nazwą techniczną schematu.
 
 JSON jest obsługiwany przez `json`, YAML przez `yaml.safe_dump`/`safe_load`. `ScenarioSerializer.write_atomic()` zapisuje UTF-8 do pliku tymczasowego, wykonuje `fsync`, a następnie `os.replace()`.
 
-## Zapis scenariusza
+## Save Configuration
 
 ```mermaid
 sequenceDiagram
@@ -144,7 +144,7 @@ Aktualny kod zapisuje kategorie: vehicle, pedestrian, static object, sensor i re
 
 Rekord partial może zostać zapisany, a ograniczenia trafiają do `CaptureReport`. To istotna różnica względem dawnych założeń mówiących o zapisie wszystkich zewnętrznych aktorów.
 
-## Odczyt scenariusza
+## Load Configuration
 
 Load jest dwuetapowy.
 

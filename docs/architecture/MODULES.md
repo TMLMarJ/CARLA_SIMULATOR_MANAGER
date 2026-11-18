@@ -2,7 +2,7 @@
 
 > Katalog modułów ze wcześniejszego snapshotu. Kanoniczny podział i aktualne
 > odniesienia do kodu znajdują się w [../ARCHITECTURE.md](../ARCHITECTURE.md) i
-> [../THESIS_TECHNICAL_REFERENCE.md](../thesis/THESIS_TECHNICAL_REFERENCE.md).
+> [THESIS_TECHNICAL_REFERENCE.md](../THESIS_TECHNICAL_REFERENCE.md).
 
 ## Zakres
 
@@ -68,7 +68,7 @@ Usunięty pakiet `gui_contents/` nie jest już częścią grafu importów; wszys
 | `simulation/manager.py` | `SimulationManager` | Maszyna stanów ticków, walidacja i zastosowanie `WorldSettings`. |
 | `simulation/dashboard.py` | `SimulationDashboardMonitor` | Okresowe migawki symulacji, statystyki aktorów/sensorów i status aplikacji. |
 | `simulation/runtime.py` | `SimulationRuntime` | Handlery kontroli ticków, scheduler, okresowa obsługa dashboardu i publikacja stanu; nie tworzy własnej pętli ani wątku. |
-| `preview/map.py` | `MapPreviewCache`, `MapPreviewGenerator` | Kanoniczne generowanie obrazu z waypointów OpenDRIVE i atomowy cache PNG; zapis do `resources/maps/generated/` oraz odczyt zgodności z `images/maps/generated/`. |
+| `preview/map.py` | `MapPreviewCache`, `MapPreviewGenerator` | Kanoniczne generowanie obrazu z waypointów OpenDRIVE i atomowy cache PNG; zapis do per-user LocalAppData/XDG Cache oraz odczyt zgodności z dawnych katalogów projektu. |
 
 ## Configuration Management
 
@@ -139,7 +139,9 @@ flowchart TD
 6. **Nietypowany protokół komunikatów.** Polecenia i zdarzenia są krotkami z nazwą tekstową oraz słownikami o nieformalnym schemacie. Literówki lub brak pola są wykrywane dopiero w runtime.
 7. **Powielone widoki aktorów.** Wspólne, identyczne operacje `Treeview` są w `gui/widgets/actor_common.py`, lecz pojazdy, piesi i obiekty statyczne nadal powtarzają część obsługi ghosta, transformacji, modelu i lifecycle ze względu na różnice funkcjonalne.
 8. **Szerokie importy Tkinter.** W kodzie nadal występują szerokie importy Tkinter, co utrudnia statyczną analizę zależności GUI.
-9. **Zależności środowiskowe niepełne w `requirements.txt`.** Utrudnia to odtworzenie środowiska i automatyzację testów.
+9. **Zależności środowiskowe są wielowariantowe.** `pyproject.toml` i `uv.lock`
+   rozdzielają profile CARLA, lecz zgodność binarnego wheel, serwera i osobnego
+   katalogu Agents nadal wymaga świadomego wyboru środowiska.
 10. **Obsługa błędów jest rozproszona.** Kod miesza wyjątki, słowniki raportów, kolejki, `print` i `messagebox`; liczne szerokie `except Exception` utrudniają klasyfikację awarii.
 
 Nie stwierdzono oczywistego bezpośredniego cyklu importów między modułami produkcyjnymi. `scenarios/__init__.py` pozostaje lekki, a usunięte pakiety zgodności nie uczestniczą już w grafie importów.

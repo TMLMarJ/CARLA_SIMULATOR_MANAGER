@@ -1,53 +1,51 @@
 # Dokumentacja CARLA Simulator Manager
 
-Dokumentacja użytkowa: [README](../README.md) oraz [instalacja](../INSTALLATION.md).
+Instrukcje dla nowego użytkownika znajdują się w głównym
+[README](../README.md). Rozszerzona instalacja Windows jest opisana w
+[INSTALLATION.md](../INSTALLATION.md), a Linux i WSL2 w
+[LINUX_SETUP.md](LINUX_SETUP.md).
 
-Dokumenty kanoniczne bieżącego kodu roboczego:
+## Dokumenty kanoniczne
 
 - [Architektura](ARCHITECTURE.md)
-- [Komunikacja z CARLA](CARLA_COMMUNICATION.md)
+- [Struktura projektu](PROJECT_STRUCTURE.md)
+- [Komunikacja klient–serwer CARLA](CARLA_COMMUNICATION.md)
 - [Funkcjonalności GUI](GUI_FUNCTIONALITIES.md)
 - [Configuration Management](SCENARIO_MANAGEMENT.md)
 - [Movement Control](MOVEMENT_CONTROL.md)
-- [Audyt kompatybilności Linux](implementation/LINUX_COMPATIBILITY_AUDIT.md)
-- [Instalacja Linux — wymaga smoke testu środowiska](LINUX_SETUP.md)
-- [Raport implementacji Windows/Linux](implementation/LINUX_COMPATIBILITY_IMPLEMENTATION.md)
-- [Testowanie](TESTING.md)
-- [Materiał techniczny do pracy inżynierskiej](thesis/THESIS_TECHNICAL_REFERENCE.md)
-- [Raport przeglądu](../DOCUMENTATION_REVIEW_REPORT.md)
+- [Testowanie i weryfikacja](TESTING.md)
+- [Audyt kompatybilności Linux](LINUX_COMPATIBILITY_AUDIT.md)
+- [Materiał techniczny do pracy inżynierskiej](THESIS_TECHNICAL_REFERENCE.md)
+- [Modernizacja zarządzania zależnościami](implementation/DEPENDENCY_MANAGEMENT_MODERNIZATION.md)
 
-W razie rozbieżności dokumenty kanoniczne i aktualny kod mają pierwszeństwo.
-Raporty etapowe zachowują historię implementacji, ale mogą opisywać wcześniejsze
-wartości domyślne i nie są instrukcją uruchomieniową.
+Dokumenty w `architecture/` rozwijają wybrane zagadnienia na potrzeby
+programistyczne i pracy inżynierskiej:
 
-## Aktualna dokumentacja architektury
+- [przegląd architektury](architecture/OVERVIEW.md),
+- [moduły i zależności](architecture/MODULES.md),
+- [komunikacja z CARLA](architecture/CARLA_COMMUNICATION.md),
+- [przepływ danych](architecture/DATA_FLOW.md),
+- [architektura funkcjonalności](architecture/FEATURES.md).
 
-Poniższe dokumenty opisują bieżący kod źródłowy:
+W razie rozbieżności pierwszeństwo mają aktualny kod i dokumenty kanoniczne.
+Techniczne nazwy `scenarios`, `ScenarioManager` i podobne pozostały elementami
+wewnętrznego API; funkcja widoczna dla użytkownika nazywa się Configuration
+Management.
 
-- [Przegląd architektury](architecture/OVERVIEW.md) — cel aplikacji, technologie, komponenty i główne założenia.
-- [Struktura plików i katalogów](PROJECT_STRUCTURE.md) — skrócone drzewo repozytorium oraz przeznaczenie najważniejszych modułów.
-- [Moduły i zależności](architecture/MODULES.md) — katalog modułów Python, klasy, zależności i problemy do refaktoryzacji.
-- [Komunikacja z CARLA](architecture/CARLA_COMMUNICATION.md) — połączenie, polecenia, wątki, procesy, synchronizacja i błędy.
-- [Przepływ danych](architecture/DATA_FLOW.md) — źródła prawdy, `DataStorage` oraz zapis i odczyt scenariuszy.
-- [Architektura funkcjonalności](architecture/FEATURES.md) — GUI, aktorzy, sensory, ruch, symulacja, scenariusze i podglądy.
-- [Plan i historia refaktoryzacji](architecture/legacy/REFACTOR_PLAN.md) — archiwalna mapa migracji i zrealizowanych etapów.
+## Testy i workflow
 
-Historyczne dokumenty projektowe są zachowane w [archiwum decyzji](architecture/legacy/README.md). Mogą zawierać uzasadnienia wcześniejszych decyzji, lecz nie są źródłem prawdy o aktualnej implementacji.
-
-## Pozostałe katalogi
-
-- `architecture/` — wersjonowana dokumentacja techniczna.
-- `testing/` — wersjonowana dokumentacja organizacji i pokrycia testów.
-- `implementation/` — lokalne raporty implementacyjne Codexa, ignorowane przez Git i nieobecne w zdalnym repozytorium.
-
-## Testy
-
-- [Organizacja i uruchamianie testów jednostkowych](testing/UNIT_TESTS.md)
+- [Organizacja testów jednostkowych](testing/UNIT_TESTS.md)
 - [Audyt pokrycia funkcjonalnego](testing/TEST_COVERAGE.md)
 - [Manualna checklista E2E](testing/MANUAL_E2E_CHECKLIST.md)
 - [Katalog testów](../tests/)
+- [Workflow projektu](../WORKFLOW.md)
 
-Workflow projektu pozostaje w [WORKFLOW.md](../WORKFLOW.md).
+Wyników testów mockowanych nie należy przedstawiać jako zaliczonego E2E z
+prawdziwym serwerem CARLA.
 
-Repozytorium nie zawiera obecnie arkusza `.xlsx`/`.xls`. Historyczne raporty z
-celowanych przebiegów nie są wynikiem manualnych E2E.
+## Archiwum
+
+[Archiwum raportów](archive/README.md) zachowuje kontekst wykonanych etapów, ale
+nie jest źródłem bieżących instrukcji. Pozostałe lokalne raporty w ignorowanych
+przez Git katalogach `docs/implementation/`, `docs/architecture/legacy/` i
+`docs/thesis/` mają wyłącznie charakter historyczny.

@@ -1,12 +1,15 @@
 # Testy jednostkowe
 
-> Dane 33/316 oraz opisane wyniki dotyczą wcześniejszego snapshotu. Bieżąca
-> statyczna inwentaryzacja i status bez uruchamiania pełnego zestawu znajdują się
-> w [../TESTING.md](../TESTING.md).
+> Dokument zachowuje organizację i wyniki wcześniejszego snapshotu 33/316 jako
+> materiał historyczny. Bieżący status i ograniczenia weryfikacji znajdują się
+> w [../TESTING.md](../TESTING.md); liczby poniżej nie są aktualnym wynikiem
+> release regression.
 
 ## Framework i zakres
 
-Projekt używa `unittest` ze standardowej biblioteki Pythona oraz `unittest.mock`. Zestaw zawiera 33 pliki testowe i 316 unikalnych metod `test_*`.
+Projekt używa `unittest` ze standardowej biblioteki Pythona oraz
+`unittest.mock`. W opisywanym historycznym snapshotcie zestaw zawierał 33 pliki
+testowe i 316 unikalnych metod `test_*`.
 
 Testy nie uruchamiają serwera CARLA. Obiekty świata, aktorów, blueprintów, Traffic Managera i kontrolerów są zastępowane lokalnymi fake'ami, `SimpleNamespace` albo mockami. Część testów obejmuje kilka współpracujących modułów i ma charakter testów komponentowych, ale nadal działa w jednym procesie bez zewnętrznego symulatora.
 
@@ -82,7 +85,9 @@ Pygame nie jest uruchamiany przez obecne testy. Import Pygame w procesach podgl�
 
 Po etapie 4B.10 usunięto trzy testy sprawdzające wyłącznie zgodność starych shimów; pozostałe 316 przypadków zachowuje testy funkcjonalne. Końcowy discovery zakończył się wynikiem `OK` dla wszystkich 316 testów. Jednorazowy probe Windows potwierdził uruchomienie top-level targetu z `preview.movement` przez kontekst `multiprocessing.spawn`; nie otwierał Pygame ani połączenia CARLA.
 
-Nie wszystkie zależności importowane przez aplikację są obecnie zadeklarowane w `requirements.txt`; opisano to również w dokumentacji architektury.
+Zależności importowane przez aplikację i oficjalny BasicAgent są zadeklarowane
+w `pyproject.toml`; `requirements.txt` odzwierciedla bezpośredni runtime dla pip.
+Testy korzystają ze standardowego `unittest` i nie wymagają osobnego frameworka.
 
 ## Testy jednostkowe i komponentowe
 

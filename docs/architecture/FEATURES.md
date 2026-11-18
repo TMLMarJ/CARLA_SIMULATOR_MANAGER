@@ -1,7 +1,7 @@
 # Architektura funkcjonalności
 
 > Dokument uzupełniający ze wcześniejszego snapshotu. Aktualne funkcje zakładek
-> opisuje [../GUI_FUNCTIONALITIES.md](../GUI_FUNCTIONALITIES.md), scenariusze
+> opisuje [../GUI_FUNCTIONALITIES.md](../GUI_FUNCTIONALITIES.md), Configuration Management
 > [../SCENARIO_MANAGEMENT.md](../SCENARIO_MANAGEMENT.md), a movement
 > [../MOVEMENT_CONTROL.md](../MOVEMENT_CONTROL.md).
 
@@ -17,7 +17,7 @@ Operacje asynchroniczne wracają przez kolejki. `check_connection()`, `check_sim
 
 **Moduły i klasy:** `gui.tabs.world.CustomWorldAndWeatherFrame`, `CarlaController.change_world()`, `change_weather()`, `preview.map.MapPreviewCache`.
 
-Zakładka pobiera listę map, pogodę i spawn pointy z `DataStorage`. Zmiana pogody jest kolejką polecenia. Zmiana mapy uruchamia workflow `Manager.begin_world_change()`, zatrzymuje funkcje zależne od epizodu i czeka na wynik kontrolera. Widok odczytuje wygenerowany PNG z cache `resources/maps/generated/` (z fallbackiem do starego `images/maps/generated/`); nie generuje geometrii ani nie wykonuje CARLA RPC.
+Zakładka pobiera listę map, pogodę i spawn pointy z `DataStorage`. Zmiana pogody jest kolejką polecenia. Zmiana mapy uruchamia workflow `Manager.begin_world_change()`, zatrzymuje funkcje zależne od epizodu i czeka na wynik kontrolera. Widok odczytuje wygenerowany PNG z per-user LocalAppData/XDG Cache (z fallbackiem do dawnych katalogów projektu); nie generuje geometrii ani nie wykonuje CARLA RPC.
 
 Powiązania: zmiana świata resetuje aktorów, sensory, ruch, podglądy, dashboard, ustawienia symulacji oraz plany scenariuszy.
 
@@ -155,7 +155,7 @@ Wyniki są słownikami przechowywanymi w `DataStorage`; widok renderuje je bez b
 
 ## Configuration Management
 
-**Moduły i klasy:** `ScenarioManager`, `ScenarioCapture`, `ScenarioSerializer`, `ScenarioValidator`, `ScenarioLoader`, `ScenarioRestorer`, `WorldCleaner`, `WorldSynchronizer`, `ActorAdopter` oraz modele z `models.scenarios`. Implementacje domenowe znajdują się w `scenarios.*`.
+**Moduły i klasy:** `ScenarioManager`, `ScenarioCapture`, `ScenarioSerializer`, `ScenarioValidator`, `ScenarioLoader`, `ScenarioRestorer`, `WorldCleaner`, `WorldSynchronizer`, `ActorAdopter` oraz modele z `models.scenarios`. Są to zachowane nazwy techniczne; funkcja użytkowa nazywa się Configuration Management. Implementacje domenowe znajdują się w `scenarios.*`.
 
 `ScenarioSaveFrame` jest częścią zakładki Simulation Control. Save najpierw synchronizuje świat, zapisuje managed actors, waliduje dokument i wykonuje atomowy zapis JSON/YAML. Load wykonuje bezinwazyjny preflight, pokazuje zakres użytkownikowi, a po potwierdzeniu ponownie weryfikuje plik i świat przed selective clear lub zmianą mapy.
 
@@ -188,7 +188,9 @@ Po połączeniu i zmianie mapy kontroler kolejkuje generowanie. Operacja działa
 - `carla.Map.generate_waypoints(2.5)` dostarcza geometrię;
 - waypointy są grupowane według `(road_id, lane_id)` i dzielone przy dużych przerwach;
 - Pillow renderuje obraz 800×600 z zachowaniem proporcji;
-- `MapPreviewCache` zapisuje zweryfikowany PNG do `resources/maps/generated/` pod nazwą zawierającą hash mapy i może odczytać starszy cache z `images/maps/generated/`.
+- `MapPreviewCache` zapisuje zweryfikowany PNG do per-user LocalAppData/XDG
+  Cache pod nazwą zawierającą hash mapy i może odczytać starszy cache z
+  katalogów projektu.
 
 Zlecenie zawiera `world_id` i nazwę mapy, więc wynik starego epizodu jest odrzucany. `shutdown_event` może przerwać generowanie. GUI otrzymuje jedynie ścieżkę przez `map_preview_event_queue` i ładuje obraz z dysku.
 

@@ -6,7 +6,10 @@ tester_function.ipynb
 /docs/implementation/
 /docs/architecture/legacy
 /docs/thesis/
+/docs/archive/
 /venvv15/
+/.venv/
+/.venv-*/
 
 __pycache__/
 *.py[cod]

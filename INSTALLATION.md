@@ -2,13 +2,13 @@
 
 Instrukcja pierwszego uruchomienia dla początkującego użytkownika, obejmująca
 pobranie serwera i projektu, znajduje się w [README](README.md). Poniższy
-dokument rozwija konfigurację środowiska Windows. Procedura Linux znajduje się
-w [docs/LINUX_SETUP.md](docs/LINUX_SETUP.md), a zakres jej rzeczywistej
-weryfikacji w [audycie](docs/implementation/LINUX_COMPATIBILITY_AUDIT.md).
+dokument rozwija konfigurację środowiska i CARLA Python API. Procedura Linux i
+WSL2 znajduje się w [docs/LINUX_SETUP.md](docs/LINUX_SETUP.md), a zakres
+weryfikacji w [audycie](docs/LINUX_COMPATIBILITY_AUDIT.md).
 
 ## Wymagania środowiskowe
 
-- Windows z Pythonem zgodnym z używanym wheel CARLA Python API;
+- Windows 11 albo Linux x86-64 z Pythonem zgodnym z używanym wheel CARLA API;
 - CARLA 0.9.15 albo 0.9.16; wersją referencyjną pozostaje 0.9.16;
 - Tkinter dostępny w instalacji Pythona;
 - importowalny moduł `carla` zgodny z serwerem oraz oficjalny katalog
@@ -22,39 +22,68 @@ dla nich oficjalny wheel dokładnie tej wersji CARLA.
 
 ## Środowisko Python
 
-Z katalogu projektu utwórz i aktywuj środowisko wirtualne:
+`pyproject.toml` jest źródłem bezpośrednich zależności. `uv.lock` przechowuje
+rozwiązanie dla Windows/Linux x86-64 oraz Pythona 3.10–3.12. Projekt nie jest
+budowany jako biblioteka (`tool.uv.package = false`), a punkt wejścia pozostaje
+`python app.py`.
+
+### Zalecane: uv
+
+Zainstaluj [uv](https://docs.astral.sh/uv/getting-started/installation/), wybierz
+jedną wersję CARLA i wykonaj odpowiednie polecenie w katalogu projektu:
+
+| Środowisko Windows | Polecenie |
+|---|---|
+| CARLA 0.9.16 / Python 3.12 | `uv sync --locked --python 3.12 --extra carla-0-9-16 --no-dev` |
+| CARLA 0.9.15 / Python 3.10 | `uv sync --locked --python 3.10 --extra carla-0-9-15 --no-dev` |
+
+Następnie aktywuj środowisko:
 
 ```powershell
-python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
 ```
 
-`requirements.txt` zawiera niewersjonowaną listę pakietów używanych przez
-środowisko aplikacji, m.in. PyYAML, Pillow, NumPy, Matplotlib, Pygame i Pygments.
-Wpis `carla` jest zakomentowaną lokalną ścieżką do wheel 0.9.16, a więc nie
-instaluje przenośnie CARLA. Wheel oraz oficjalny katalog `agents` należy dobrać
-do interpretera i używanej dystrybucji serwera.
+Profile `carla-0-9-15` i `carla-0-9-16` są jawnie skonfigurowane jako
+konfliktowe. Nie używaj `--all-extras` i nie instaluj obu w jednym venv.
 
-Zaobserwowane środowiska repozytorium to CPython 3.12.10 + `carla 0.9.16` w
-`.venv` oraz CPython 3.10.11 + `carla 0.9.15` w `venvv15`. Są to konfiguracje
-lokalne, nie wynik zaliczonych testów E2E.
+### Alternatywa: venv i pip
 
-Moduł CARLA należy zainstalować osobno, odpowiednio do serwera:
+Pip korzysta z krótkiej listy zgodności `requirements.txt`, zsynchronizowanej
+z `[project].dependencies`. CARLA trzeba dobrać jawnie:
 
 ```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
 python -m pip install "carla==0.9.16"
 ```
 
-albo w środowisku Python 3.10 dla starszego serwera:
+Wariant 0.9.15:
 
 ```powershell
+py -3.10 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
 python -m pip install "carla==0.9.15"
 ```
 
+`requirements.txt` nie jest osobnym źródłem wersji: przy zmianie bezpośrednich
+zależności należy zaktualizować tę samą prostą listę również w
+`pyproject.toml`. Zależności pośrednie wybiera pip; pełne wersje powtarzalnego
+środowiska są zapisane w `uv.lock`.
+
+Nie używaj Pythona 3.14 dla CARLA 0.9.16 — oficjalne wheel tej wersji obejmują
+CPython 3.10–3.12. Dla CARLA 0.9.15 najprostsza wspierana konfiguracja projektu
+to Python 3.10.
+
+Wheel CARLA oraz oficjalny katalog `agents` zawsze muszą odpowiadać wersji
+serwera. Profile uv instalują wheel, lecz nie dostarczają katalogu Agents.
+
 ## CARLA Python API
 
-Moduł `carla` musi być importowalny w wybranym interpreterze. Resolver
+Binarny moduł `carla` musi być zainstalowany w aktywnym venv. Katalog
+`PythonAPI/carla/agents` jest osobnym zestawem skryptów Python z oficjalnej
+dystrybucji lub źródeł tego samego wydania CARLA. Resolver
 `core/carla_pythonapi.py` ładuje z tej samej oficjalnej instalacji:
 
 ```text
@@ -75,6 +104,20 @@ $env:CARLA_ROOT = 'C:\CARLA_0.9.16'
 ```
 
 Pierwsza zmienna może wskazywać bezpośrednio katalog zawierający `agents/`. Druga wskazuje katalog instalacji CARLA; aplikacja sprawdza również wariant `PythonAPI/carla`. Jeśli żadna nie jest ustawiona, resolver próbuje użyć już importowalnego `agents.navigation`. Jawnie skonfigurowana ścieżka ma pierwszeństwo, a moduł załadowany spoza niej jest odrzucany jako konflikt.
+
+`CARLA_PYTHONAPI_PATH` jest ustawieniem Managera: resolver dodaje wskazany katalog
+do `sys.path` podczas ładowania Agents. Ogólna zmienna `PYTHONPATH` nie jest
+wymagana i nie powinna zastępować instalacji binarnego modułu `carla`; może też
+przypadkowo wprowadzić Agents z niezgodnej wersji.
+
+Kontrola środowiska:
+
+```powershell
+python -c "import carla, importlib.metadata as m; print(m.version('carla')); print(carla.__file__)"
+python -c "from core.carla_pythonapi import load_basic_agent; a,e=load_basic_agent(); print('BasicAgent OK' if a else e)"
+```
+
+Oczekiwany jest numer zgodny z serwerem oraz `BasicAgent OK`.
 
 ## Uruchomienie
 
@@ -125,7 +168,7 @@ jeżeli ma używać TM, powinna otrzymać inny zarezerwowany port, np. `8051`.
 Tryb shared nie daje aplikacji prawa do zatrzymywania TM. W takim trybie
 zmiana świata może zostać celowo przerwana, jeżeli bezpieczny teardown nie
 jest możliwy. Szczegóły opisuje
-[CARLA_COMMUNICATION.md](docs/architecture/CARLA_COMMUNICATION.md).
+[CARLA_COMMUNICATION.md](docs/CARLA_COMMUNICATION.md).
 
 ## Testy bez serwera
 

@@ -41,8 +41,10 @@ Jedynym punktem wejścia jest `app.py`. Jego blok `if __name__ == "__main__"` wy
 | Scenariusze | JSON ze standardowej biblioteki, YAML przez PyYAML |
 | Modele danych | mutowalne modele runtime z `models.actors` oraz `dataclasses` z `models.scenarios` |
 
-Plik `requirements.txt` zawiera niewersjonowaną listę pakietów, a wpis CARLA jest
-zakomentowaną ścieżką lokalną. Szczegóły opisują główny README i INSTALLATION.
+`pyproject.toml` deklaruje bezpośredni runtime, wzajemnie wykluczające się
+profile CARLA 0.9.15/0.9.16 i zakres Pythona 3.10–3.12. `uv.lock` utrwala
+rozwiązanie Windows/Linux x86-64, a krótki `requirements.txt` zachowuje
+alternatywną instalację pip. Katalog Agents nadal konfiguruje się osobno.
 
 ## Ogólna architektura
 
@@ -102,7 +104,11 @@ Obiekt nie jest trwałą bazą danych. Po rozłączeniu `Manager` tworzy nową i
 - `preview.movement` zawiera proces Pygame, publikację ramek, jednoelementowy kanał telemetrii HUD oraz wygładzanie sterowania manualnego.
 - `preview.spectator` i `preview.spectator_controls` realizują niezależne okno obserwatora z własnym klientem CARLA.
 - `preview.sensor_buffers` przechowuje thread-safe migawki sensorów bez Tkinter; okna odświeżające widgety znajdują się w `gui.windows.sensor_preview`.
-- `preview.map` generuje i buforuje obrazy OpenDRIVE; nowe pliki trafiają do `resources/maps/generated/`, a dotychczasowy `images/maps/generated/` jest odczytywany jako lokalizacja zgodności. Dostarczane obrazy znajdują się w `resources/maps/bundled/`.
+- `preview.map` generuje i buforuje obrazy OpenDRIVE; nowe pliki trafiają do
+  per-user LocalAppData albo XDG Cache/`~/.cache`. Katalogi
+  `resources/maps/generated/` i `images/maps/generated/` są odczytywane jako
+  lokalizacje zgodności, a dostarczane obrazy znajdują się w
+  `resources/maps/bundled/`.
 
 ## Relacja GUI — kontroler — serwer
 

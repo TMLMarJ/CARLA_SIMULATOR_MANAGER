@@ -2,21 +2,16 @@
 
 ## Status
 
-Projekt jest przed końcowymi manualnymi testami End-to-End. Ten przegląd nie
-uruchamiał pełnego zestawu `unittest`, serwera CARLA ani GUI i nie zmieniał
-wyników E2E.
+Projekt jest przed końcowymi manualnymi testami End-to-End. Podczas wstępnej
+kontroli wykonano podstawowe operacje na Windows 11 z CARLA 0.9.16 oraz w Ubuntu
+26.04.1 WSL2/WSLg z GUI łączącym się z serwerem Windows CARLA 0.9.16. W WSL2
+sprawdzono m.in. Sensor Preview, Movement Control, Configuration Save/Load,
+Disconnect/Reconnect i synchronizację dwóch klientów po zmianie mapy.
 
-Statyczna inwentaryzacja bieżącego katalogu `tests/` wykazała:
-
-- 42 moduły `test_*.py`;
-- 533 metody `test_*`;
-- osiem obszarów: actors, connection, core, movement, scenarios, sensors,
-  simulation i world.
-
-Liczby są stanem kodu, nie wynikiem wykonania. Starsze `UNIT_TESTS.md` podaje
-316 przypadków dla wcześniejszego snapshotu i nie powinno być używane jako
-bieżący licznik. Raporty implementacyjne dokumentują wcześniejsze celowane
-przebiegi `OK`; nie dowodzą, że obecny pełny zestaw ani E2E są zaliczone.
+Nie był to pełny E2E ani test natywnego Linuxa. Bieżący przegląd dokumentacji
+nie uruchamiał pełnego zestawu `unittest`, serwera CARLA ani GUI. Liczniki
+33/316 w dokumentach pomocniczych dotyczą historycznego snapshotu; nie należy
+ich przedstawiać jako aktualnego wyniku regresji.
 
 ## Framework i organizacja
 
@@ -108,10 +103,10 @@ przechowywany poza repozytorium, nie został zweryfikowany w tym przeglądzie.
 
 | Wymiar | Wymagane przebiegi | Status |
 |---|---|---|
-| CARLA | 0.9.15 i 0.9.16, zgodny Python API | oczekujące |
-| Python | lokalne pary 3.10.11/v15 i 3.12.10/v16 | zaobserwowane, niezaliczone E2E |
-| Sieć | localhost i LAN | oczekujące |
-| Klienci | jeden GUI, dwa GUI, GUI + klient techniczny | oczekujące |
+| CARLA | 0.9.15 i 0.9.16, zgodny Python API | podstawowo sprawdzone 0.9.16; 0.9.15 oczekuje |
+| Python | zgodny z wheel danej wersji CARLA | Python 3.12.16 sprawdzony w WSL2 z 0.9.16 |
+| Sieć | localhost i LAN/WSL2 | WSL2–Windows wstępnie sprawdzone; pozostałe oczekują |
+| Klienci | jeden GUI, dwa GUI, GUI + klient techniczny | dwa GUI wstępnie sprawdzone w WSL2/Windows |
 | World mode | asynchronous i synchronous | oczekujące |
 | Rendering | normal i wybrane `no_rendering_mode` | oczekujące |
 
@@ -143,7 +138,7 @@ osobnego, świadomego testu — podstawowa macierz zakłada zgodne pary.
 - błąd/timeout snapshotu bez częściowej instalacji;
 - Shared TM nieotrzymujący shutdown oraz Exclusive TM na własnym porcie.
 
-### Scenario
+### Configuration Management
 
 - JSON i YAML, ta sama i inna mapa;
 - pogoda, settings, wiele Ego, physics i attachment round trip;
@@ -169,7 +164,7 @@ osobnego, świadomego testu — podstawowa macierz zakłada zgodne pary.
 - ownership nie zmienia się bez utworzenia, Load albo jawnej adopcji;
 - cleanup zatrzymuje lokalne listenery, kamery, procesy i control runtime;
 - Shared TM i aktorzy innych klientów nie są niejawnie zatrzymywani/przejmowani;
-- zapis scenariusza zawiera tylko Managed scope i jest ponownie ładowalny;
+- zapis konfiguracji zawiera tylko Managed scope i jest ponownie ładowalny;
 - różnice v15/v16 są raportowane jako konkretna brakująca mapa/API/blueprint,
   nie jako ogólna deklaracja kompatybilności.
 
