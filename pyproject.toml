@@ -1,0 +1,43 @@
+[project]
+name = "carla-simulator-manager"
+version = "0.1.0"
+description = "Desktop GUI for managing CARLA 0.9.15 and 0.9.16 simulations."
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "matplotlib>=3.7,<4",
+    "networkx>=2.8,<4",
+    "numpy>=1.24,<3",
+    "Pillow>=9.5,<13",
+    "pygame>=2.5,<3",
+    "Pygments>=2.15,<3",
+    "PyYAML>=6,<7",
+    "shapely>=1.8,<3",
+]
+
+[project.optional-dependencies]
+carla-0-9-15 = [
+    "carla==0.9.15",
+]
+carla-0-9-16 = [
+    "carla==0.9.16",
+]
+
+[dependency-groups]
+test = []
+dev = [
+    { include-group = "test" },
+]
+
+[tool.uv]
+package = false
+conflicts = [
+    [
+        { extra = "carla-0-9-15" },
+        { extra = "carla-0-9-16" },
+    ],
+]
+environments = [
+    "sys_platform == 'win32' and platform_machine == 'AMD64'",
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+]

@@ -45,6 +45,11 @@ def initial_vehicle_control_state():
         "current_waypoint": None,
         "distance_to_destination": None,
         "current_speed": 0.0,
+        "throttle": 0.0,
+        "brake": 0.0,
+        "steer": 0.0,
+        "gear": 0,
+        "hand_brake": False,
         "world_id": None,
     }
 
@@ -68,5 +73,10 @@ def unknown_vehicle_control_state():
         "current_waypoint": None,
         "distance_to_destination": None,
         "current_speed": 0.0,
+        "throttle": 0.0,
+        "brake": 0.0,
+        "steer": 0.0,
+        "gear": 0,
+        "hand_brake": False,
         "world_id": None,
     }

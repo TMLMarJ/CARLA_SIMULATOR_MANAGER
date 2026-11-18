@@ -18,12 +18,14 @@ CARLA_SIMULATOR_MANAGER/
 ├── simulation/                  # sterowanie symulacją i dashboard
 ├── scenarios/                   # zapis, odczyt i synchronizacja scenariuszy
 ├── preview/                     # podglądy, bufory i mapy
-├── resources/                   # zasoby dostarczane i generowane
+├── resources/                   # zasoby dostarczane i legacy cache do odczytu
 ├── utilities/                   # współdzielone funkcje pomocnicze
 ├── tests/                       # testy według funkcjonalności
 ├── docs/                        # dokumentacja projektu
 ├── README.md
 ├── INSTALLATION.md
+├── pyproject.toml               # metadane i bezpośrednie zależności
+├── uv.lock                      # powtarzalne rozwiązanie Windows/Linux
 ├── requirements.txt
 ├── CHANGELOG.md
 └── WORKFLOW.md
@@ -36,7 +38,9 @@ CARLA_SIMULATOR_MANAGER/
 | `app.py` | Kanoniczne uruchomienie aplikacji; wywołuje `freeze_support()`, tworzy `Manager` i uruchamia `mainloop()`. |
 | `README.md` | Ogólny opis projektu i podstawowe uruchomienie. |
 | `INSTALLATION.md` | Instalacja, konfiguracja CARLA PythonAPI i typowe problemy. |
-| `requirements.txt` | Zależności Python deklarowane przez projekt. |
+| `pyproject.toml` | Kanoniczne metadane, runtime i profile CARLA dla uv. |
+| `uv.lock` | Zablokowane wersje dla Windows/Linux x86-64 i Pythona 3.10–3.12. |
+| `requirements.txt` | Krótka lista zgodności runtime dla użytkowników pip. |
 | `CHANGELOG.md` | Historia zmian projektu. |
 | `WORKFLOW.md` | Informacje o przyjętym workflow. |
 | `tester_function.ipynb` | Pomocniczy notebook istniejący w repozytorium. |
@@ -89,7 +93,7 @@ Usługi nie tworzą własnych workerów ani klientów CARLA. Są wywoływane w w
 - `pedestrians.py` — piesi;
 - `static_objects.py` — obiekty statyczne;
 - `sensors.py` — sensory;
-- `simulation.py` — Scenario Management i Simulation Control.
+- `simulation.py` — Configuration Management i Simulation Control.
 
 ### `gui/windows/`
 
@@ -124,7 +128,7 @@ Usługi nie tworzą własnych workerów ani klientów CARLA. Są wywoływane w w
 | `runtime.py` | Tick scheduler oraz wykonawcze handlery symulacji. |
 | `dashboard.py` | Budowanie snapshotów dashboardu. |
 
-## `scenarios/` — Scenario Management
+## `scenarios/` — Configuration Management
 
 | Plik | Odpowiedzialność |
 |---|---|
@@ -158,10 +162,13 @@ Usługi nie tworzą własnych workerów ani klientów CARLA. Są wywoływane w w
 resources/
 └── maps/
     ├── bundled/                 # mapy dostarczane z projektem
-    └── generated/               # lokalny, ignorowany cache generatora
+    └── generated/               # dawny cache, obecnie tylko do odczytu
 ```
 
-Stary cache `images/maps/generated/` jest nadal odczytywany dla kompatybilności. Dane użytkownika nie są automatycznie przenoszone ani usuwane.
+Nowy cache jest zapisywany w LocalAppData na Windows albo XDG
+Cache/`~/.cache` na Linuxie. Stare katalogi `resources/maps/generated/` i
+`images/maps/generated/` są nadal odczytywane dla kompatybilności. Dane
+użytkownika nie są automatycznie przenoszone ani usuwane.
 
 ## `tests/` — organizacja testów
 
@@ -186,7 +193,8 @@ Testy używają `unittest` i fake'ów/mocków. Nie uruchamiają automatycznie se
 | `docs/README.md` | Indeks dokumentacji. |
 | `docs/architecture/` | Aktualna architektura, moduły, komunikacja, przepływ danych i historia refaktoryzacji. |
 | `docs/testing/` | Organizacja testów, pokrycie funkcjonalne i checklista manualna. |
-| `docs/implementation/` | Lokalne raporty implementacyjne ignorowane przez Git. |
+| `docs/archive/` | Wybrane raporty historyczne zachowane w repozytorium. |
+| `docs/implementation/` | Pozostałe lokalne raporty implementacyjne ignorowane przez Git. |
 
 ## Ścieżki kanoniczne i dane historyczne
 

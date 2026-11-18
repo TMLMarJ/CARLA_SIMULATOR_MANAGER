@@ -118,6 +118,7 @@ class CarlaController(MovementRuntime, SimulationRuntime, ScenarioRuntime):
         self.manual_control_received_at = None
         self.manual_control_next_apply = 0.0
         self.manual_control_input_fresh = False
+        self.movement_telemetry_next_update = 0.0
         self.traffic_manager = None
         self.traffic_manager_world_id = None
         self.traffic_manager_last_sync = None
@@ -456,6 +457,41 @@ class CarlaController(MovementRuntime, SimulationRuntime, ScenarioRuntime):
         try:
             self._run_controller()
         except Exception as error:
+            if self.shutdown_event.is_set():
+                for cleanup in (
+                    lambda: self._shutdown_vehicle_controls(
+                        disable_autopilot=True,
+                        clear_paths=False,
+                        strict=False,
+                    ),
+                    lambda: self._shutdown_walker_ai(strict=False),
+                    lambda: self.cleanup_movement_preview(
+                        "controller_stopped",
+                        strict=False,
+                    ),
+                    lambda: self.cleanup_sensor_previews(strict=False),
+                    lambda: self.cleanup_preview(strict=False),
+                    lambda: self._shutdown_exclusive_traffic_manager(
+                        "disconnect",
+                        strict=False,
+                    ),
+                ):
+                    try:
+                        cleanup()
+                    except Exception:
+                        pass
+                self._invalidate_traffic_manager_reference()
+                self._invalidate_database_world_reference()
+                self.running = False
+                self.data_ready = False
+                self.simulation_manager.disconnect()
+                self.dashboard_monitor.disconnect(
+                    self.database,
+                    "Disconnected by user",
+                )
+                self._publish_simulation_control_state(force=True)
+                self.connection_queue.put(("disconnected", None))
+                return
             self._shutdown_vehicle_controls(
                 disable_autopilot=True,
                 clear_paths=False,
@@ -581,6 +617,12 @@ class CarlaController(MovementRuntime, SimulationRuntime, ScenarioRuntime):
             )
             cmd, data = self._get_next_command(queue_timeout)
 
+            # shutdown_event is set before the priority command is queued.
+            # Do not dispatch an older regular command (and its RPC calls)
+            # while an intentional disconnect is already in progress.
+            if self.shutdown_event.is_set():
+                cmd, data = "shutdown", None
+
             if self._movement_command_is_stale(cmd, data, world):
                 continue
 
@@ -595,7 +637,6 @@ class CarlaController(MovementRuntime, SimulationRuntime, ScenarioRuntime):
                 cmd = None
 
             if cmd == "shutdown":
-                print("DEBUG: SHUTDOWN COMMAND RECEIVED")
                 self.simulation_manager.disconnect()
                 self._publish_simulation_control_state(force=True)
                 self.running = False
@@ -1546,6 +1587,7 @@ class CarlaController(MovementRuntime, SimulationRuntime, ScenarioRuntime):
 
             if not self.world_transition_event.is_set():
                 self._service_manual_vehicle_control()
+                self._service_movement_vehicle_telemetry()
                 if not self.simulation_manager.synchronous_mode:
                     self._service_basic_agent_control(world)
 
@@ -1845,7 +1887,7 @@ class CarlaController(MovementRuntime, SimulationRuntime, ScenarioRuntime):
         self.running = False
         if self.thread is None or not self.thread.is_alive():
             return
-        self.command_queue.put(("shutdown", None))
+        self.priority_command_queue.put(("shutdown", None))
 
     def cleanup_preview(self, strict=False):
         actor_service = getattr(self, "actor_service", None)

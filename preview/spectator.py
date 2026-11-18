@@ -67,7 +67,11 @@ class SpectatorPreviewManager:
             ),
             name="CARLA Spectator Preview"
         )
-        self.process.start()
+        try:
+            self.process.start()
+        except Exception:
+            self._release_process_resources()
+            raise
         self.stop_requested_at = None
         return True
 
@@ -136,9 +140,18 @@ class SpectatorPreviewManager:
     def _release_process_resources(self):
         if self.event_queue is not None:
             try:
+                self.event_queue.cancel_join_thread()
                 self.event_queue.close()
             except (OSError, ValueError):
                 pass
+        process = self.process
+        if process is not None:
+            close = getattr(process, "close", None)
+            if close is not None:
+                try:
+                    close()
+                except (OSError, ValueError):
+                    pass
         self.process = None
         self.stop_event = None
         self.event_queue = None

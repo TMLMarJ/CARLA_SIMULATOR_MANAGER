@@ -1,13 +1,12 @@
 import tkinter as tk
 import time
 import queue
-from tkinter import ttk
+from tkinter import messagebox, ttk
 from PIL import Image, ImageDraw, ImageOps, ImageTk
 
 from preview.map import MapPreviewCache
 from utilities.functions import parse_weather_to_dict, parse_weather_to_carla
 from utilities.map_names import visible_map_names
-import messagebox
 
 class CustomWorldAndWeatherFrame(tk.Frame):
     def __init__(self, parent, controller):

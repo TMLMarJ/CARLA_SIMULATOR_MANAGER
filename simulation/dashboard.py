@@ -1,7 +1,47 @@
+import collections
+import math
 import time
 
 from models.scenarios import ActorOwnership
 from scenarios.classifier import ActorClassifier
+
+
+class SimulationFpsTracker:
+    """Estimate server frame progress against a local monotonic clock."""
+
+    def __init__(self, window_seconds=1.0):
+        self.window_seconds = float(window_seconds)
+        self.samples = collections.deque()
+
+    def reset(self):
+        self.samples.clear()
+
+    def observe(self, frame, observed_at):
+        try:
+            frame = int(frame)
+            observed_at = float(observed_at)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if frame < 0 or not math.isfinite(observed_at):
+            return None
+
+        if self.samples:
+            previous_time, previous_frame = self.samples[-1]
+            if observed_at <= previous_time or frame < previous_frame:
+                self.reset()
+        self.samples.append((observed_at, frame))
+
+        cutoff = observed_at - self.window_seconds
+        while len(self.samples) > 2 and self.samples[1][0] <= cutoff:
+            self.samples.popleft()
+        if len(self.samples) < 2:
+            return None
+
+        first_time, first_frame = self.samples[0]
+        elapsed = observed_at - first_time
+        if elapsed <= 0:
+            return None
+        return max(0.0, (frame - first_frame) / elapsed)
 
 
 class SimulationDashboardMonitor:
@@ -48,6 +88,7 @@ class SimulationDashboardMonitor:
         self.world_revision = 0
         self.last_error = None
         self.last_successful_update = None
+        self.fps_tracker = SimulationFpsTracker()
         self._next_update = {
             name: 0.0 for name in self.DEFAULT_INTERVALS
         }
@@ -63,6 +104,7 @@ class SimulationDashboardMonitor:
             "frame": None,
             "elapsed_seconds": None,
             "delta_seconds": None,
+            "simulation_fps": None,
             "map_name": None,
             "synchronous_mode": None,
             "fixed_delta_seconds": None,
@@ -146,6 +188,7 @@ class SimulationDashboardMonitor:
         }
 
     def reset_world(self, database, world, reason="World changed"):
+        self.fps_tracker.reset()
         self.world_revision += 1
         self.map_name = None
         try:
@@ -157,6 +200,7 @@ class SimulationDashboardMonitor:
             self._next_update[name] = 0.0
 
     def disconnect(self, database, reason="Disconnected", error=None):
+        self.fps_tracker.reset()
         if error is not None:
             self.record_error(error)
         self.invalidate(database, reason, connection_status="Disconnected")
@@ -211,6 +255,7 @@ class SimulationDashboardMonitor:
                     control_state,
                     self.world_revision,
                     self.wall_clock(),
+                    self.fps_tracker.observe(snapshot.frame, now),
                 )
                 with database.lock:
                     database.simulation_snapshot = data
@@ -293,7 +338,8 @@ class SimulationDashboardMonitor:
 
     @staticmethod
     def build_simulation_snapshot(snapshot, map_name, settings, control_state,
-                                  world_revision, updated_at):
+                                  world_revision, updated_at,
+                                  simulation_fps=None):
         timestamp = getattr(snapshot, "timestamp", None)
         elapsed_seconds = getattr(timestamp, "elapsed_seconds", None)
         delta_seconds = getattr(timestamp, "delta_seconds", None)
@@ -310,6 +356,7 @@ class SimulationDashboardMonitor:
             "delta_seconds": (
                 None if delta_seconds is None else float(delta_seconds)
             ),
+            "simulation_fps": simulation_fps,
             "map_name": map_name,
             "synchronous_mode": settings.get("synchronous_mode"),
             "fixed_delta_seconds": settings.get("fixed_delta_seconds"),

@@ -12,6 +12,7 @@ from gui.windows.movement_control import MovementControlWindow
 from models.scenarios import ActorOwnership
 from movement.session import MovementControlSessionManager
 from preview.spectator import SpectatorPreviewManager
+from utilities.map_names import resolve_available_map
 
 
 class Manager(tk.Tk):
@@ -158,7 +159,6 @@ class Manager(tk.Tk):
                     return
 
                 elif status == "disconnected":
-                    print("DEBUG: DISCONNECTED EVENT RECEIVED")
                     self.finish_disconnection()
                     return
         except queue.Empty:
@@ -222,7 +222,6 @@ class Manager(tk.Tk):
             self.update_spectator_state("Closed")
 
     def disconnect_from_carla(self):
-        print("DEBUG: disconnect_from_carla CALLED")
         if self.carla is None or self.disconnecting:
             return
 
@@ -319,7 +318,7 @@ class Manager(tk.Tk):
             "Adopt this external actor into GUI management?\n\n"
             f"Runtime ID: {runtime_id}\n"
             f"Type: {type_id}\n\n"
-            "The actor will qualify for Scenario Save and Managed Clear. "
+            "The actor will qualify for Configuration Save and Managed Clear. "
             "Other CARLA clients can still control or delete it, and its "
             "current external control state may be unknown.",
         )
@@ -362,11 +361,11 @@ class Manager(tk.Tk):
             return
         path = filedialog.askopenfilename(
             parent=self,
-            title="Load CARLA scenario",
+            title="Load CARLA configuration",
             filetypes=(
-                ("CARLA scenarios", "*.json *.yaml *.yml"),
-                ("JSON scenario", "*.json"),
-                ("YAML scenario", "*.yaml *.yml"),
+                ("CARLA configurations", "*.json *.yaml *.yml"),
+                ("JSON configuration", "*.json"),
+                ("YAML configuration", "*.yaml *.yml"),
                 ("All files", "*.*"),
             ),
         )
@@ -382,7 +381,7 @@ class Manager(tk.Tk):
         simulation_frame.set_external_busy(True)
         simulation_frame.scenario_frame.set_load_pending()
         self.main_view.main_view.dashboard_frame.show_context(
-            "Scenario Load preflight"
+            "Configuration Load preflight"
         )
 
     @staticmethod
@@ -394,8 +393,8 @@ class Manager(tk.Tk):
         )
         metadata = plan.get("metadata") or {}
         lines = [
-            f"Scenario: {metadata.get('name') or '-'}",
-            f"Scenario map: {plan.get('target_map') or '-'}",
+            f"Configuration: {metadata.get('name') or '-'}",
+            f"Configuration map: {plan.get('target_map') or '-'}",
             f"Current map: {plan.get('current_map') or '-'}",
             "Map change required: "
             f"{'yes' if plan.get('map_change_required') else 'no'}",
@@ -405,7 +404,7 @@ class Manager(tk.Tk):
             "Skipped infrastructure: "
             f"{plan.get('skipped_infrastructure', 0)}",
             f"Readiness: {plan.get('status', 'unknown')}",
-            "Clear policy: selective scenario replacement.",
+            "Clear policy: selective configuration replacement.",
         ]
         if plan.get("map_change_required"):
             lines.append(
@@ -435,7 +434,7 @@ class Manager(tk.Tk):
         lines = [
             cls._load_preflight_message(plan),
             "",
-            "This operation replaces the managed scenario configuration. "
+            "This operation replaces the managed simulation configuration. "
             "On the current map it removes all vehicles and pedestrians, "
             "managed static objects, and dependent sensors/controllers.",
             "There is no automatic rollback.",
@@ -450,7 +449,7 @@ class Manager(tk.Tk):
             lines.append(
                 "External static objects are preserved on the current map."
             )
-        lines.extend(["", "Continue with Scenario Load?"])
+        lines.extend(["", "Continue with Configuration Load?"])
         return "\n".join(lines)
 
     def _handle_load_preflight(self, plan):
@@ -461,13 +460,13 @@ class Manager(tk.Tk):
             self._finish_load_gui()
             frame.show_load_error("Preflight found critical problems.")
             messagebox.showerror(
-                "Load Scenario preflight",
+                "Load Configuration preflight",
                 self._load_preflight_message(plan),
             )
             return
 
         confirmed = messagebox.askyesno(
-            "Load Scenario � destructive operation",
+            "Load Configuration - destructive operation",
             self._load_confirmation_message(plan),
         )
         if not confirmed:
@@ -490,9 +489,9 @@ class Manager(tk.Tk):
             confirmed=True,
         )
         if accepted:
-            frame.set_load_pending("Loading scenario...")
+            frame.set_load_pending("Loading configuration...")
             self.main_view.main_view.dashboard_frame.show_context(
-                "Loading Scenario"
+                "Loading Configuration"
             )
         else:
             self._finish_load_gui()
@@ -514,7 +513,7 @@ class Manager(tk.Tk):
     def _load_report_message(report):
         lines = [
             f"Status: {report.get('status', 'failed')}",
-            f"Scenario: {report.get('name') or '-'}",
+            f"Configuration: {report.get('name') or '-'}",
             f"Planned actors: {report.get('planned', 0)}",
             f"Source actors omitted by scope: "
             f"{report.get('scope_skipped', 0)}",
@@ -740,6 +739,10 @@ class Manager(tk.Tk):
                 status, data = self.database.scenario_event_queue.get_nowait()
                 if status == "world_sync_completed":
                     if self.connected and not self.disconnecting and not self.closing:
+                        if not self._world_sync_report_is_current(data):
+                            continue
+                        if data.get("episode_changed"):
+                            self._handle_external_world_change(data)
                         self._refresh_actor_tables()
                         self.main_view.main_view.connection_frame.show_sync_result(
                             data
@@ -793,10 +796,10 @@ class Manager(tk.Tk):
                 elif status == "scenario_operation_blocked":
                     if not self.closing:
                         messagebox.showinfo(
-                            "Scenario operation",
+                            "Configuration operation",
                             data.get(
                                 "message",
-                                "Another scenario operation is pending.",
+                                "Another configuration operation is pending.",
                             ),
                         )
                 elif status == "scenario_save_completed":
@@ -807,7 +810,7 @@ class Manager(tk.Tk):
                             data
                         )
                         messagebox.showinfo(
-                            "Scenario saved",
+                            "Configuration saved",
                             f"Saved {data.get('saved', 0)} actors to:\n"
                             f"{data.get('path', '')}\n\n"
                             f"Partial: {data.get('partial', 0)}\n"
@@ -821,7 +824,7 @@ class Manager(tk.Tk):
                         self.main_view.simulation_control_frame.scenario_frame.show_error(
                             message
                         )
-                        messagebox.showerror("Save Scenario", message)
+                        messagebox.showerror("Save Configuration", message)
                 elif status == "world_clear_preflight_ready":
                     if self.connected and not self.disconnecting and not self.closing:
                         self._handle_clear_preflight(data)
@@ -873,14 +876,14 @@ class Manager(tk.Tk):
                     if not self.closing:
                         message = data.get(
                             "message",
-                            "Scenario Load preflight failed.",
+                            "Configuration Load preflight failed.",
                         )
                         frame = (
                             self.main_view.simulation_control_frame.scenario_frame
                         )
                         frame.show_load_error(message)
                         messagebox.showerror(
-                            "Load Scenario preflight",
+                            "Load Configuration preflight",
                             message,
                         )
                 elif status == "scenario_load_plan_invalidated":
@@ -889,7 +892,7 @@ class Manager(tk.Tk):
                         if not self.closing:
                             message = data.get(
                                 "reason",
-                                "The Scenario Load plan is no longer valid.",
+                                "The Configuration Load plan is no longer valid.",
                             )
                             frame = (
                                 self.main_view.simulation_control_frame.scenario_frame
@@ -897,11 +900,11 @@ class Manager(tk.Tk):
                             frame.show_load_error(message)
                 elif status == "scenario_load_destructive_started":
                     if self.connected and not self.disconnecting and not self.closing:
-                        self.movement_control.request_close("Scenario Load")
+                        self.movement_control.request_close("Configuration Load")
                         if self.spectator_preview.request_stop():
                             self.update_spectator_state("Stopping")
                         self.main_view.main_view.dashboard_frame.show_context(
-                            "Loading Scenario"
+                            "Loading Configuration"
                         )
                 elif status == "scenario_load_completed":
                     self._finish_load_gui()
@@ -919,28 +922,28 @@ class Manager(tk.Tk):
                         message = self._load_report_message(data)
                         status_value = data.get("status", "failed")
                         if status_value == "success":
-                            messagebox.showinfo("Load Scenario completed", message)
+                            messagebox.showinfo("Load Configuration completed", message)
                         elif status_value == "partial_success":
                             messagebox.showwarning(
-                                "Load Scenario partially completed",
+                                "Load Configuration partially completed",
                                 message,
                             )
                         elif status_value == "cancelled":
-                            messagebox.showinfo("Load Scenario cancelled", message)
+                            messagebox.showinfo("Load Configuration cancelled", message)
                         else:
-                            messagebox.showerror("Load Scenario failed", message)
+                            messagebox.showerror("Load Configuration failed", message)
                 elif status == "scenario_load_error":
                     self._finish_load_gui()
                     if not self.closing:
                         message = data.get(
                             "message",
-                            "Scenario Load failed.",
+                            "Configuration Load failed.",
                         )
                         self.main_view.simulation_control_frame.scenario_frame.show_load_error(
                             message
                         )
                         messagebox.showerror(
-                            "Load Scenario",
+                            "Load Configuration",
                             message,
                         )
         except queue.Empty:
@@ -957,6 +960,57 @@ class Manager(tk.Tk):
                 getattr(frame, table_name).refresh_table()
         if self.main_view.sensor_frame is not None:
             self.main_view.sensor_frame.refresh_table()
+
+    def _world_sync_report_is_current(self, report):
+        if not isinstance(report, dict):
+            return False
+        report_world_id = report.get("world_id")
+        report_generation = report.get("world_generation")
+        if report_generation is None:
+            return True
+        with self.database.lock:
+            current_world_id = self.database.world_id
+            current_generation = self.database.world_generation
+        try:
+            return (
+                int(report_world_id) == int(current_world_id)
+                and int(report_generation) == int(current_generation)
+            )
+        except (TypeError, ValueError):
+            return False
+
+    def _handle_external_world_change(self, report):
+        """Close old-episode GUI resources and rebuild dependent tabs."""
+        self.pending_movement_control_actor_id = None
+        self.movement_control.request_close("CARLA world changed externally")
+        self.close_spectator_preview()
+
+        self.main_view.clear_connected_views()
+        self.main_view.initialize_connected_views()
+        world_frame = self.main_view.world_weather_frame
+        if world_frame is not None:
+            try:
+                active_map = resolve_available_map(
+                    report.get("map_name"),
+                    self.database.world_lib,
+                )
+            except ValueError:
+                active_map = None
+            if active_map is not None:
+                world_frame.selected_map.set(active_map)
+            world_frame.reset_weather()
+            try:
+                world_frame.update_image(None)
+            except (FileNotFoundError, OSError):
+                pass
+        for actor_frame in (
+            self.main_view.vehicle_frame,
+            self.main_view.actor_frame,
+            self.main_view.static_object_frame,
+        ):
+            if actor_frame is not None:
+                actor_frame.update_spawn_point()
+        self._refresh_dashboard()
 
     def _refresh_after_scenario_load(self, report):
         self._refresh_actor_tables()

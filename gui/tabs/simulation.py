@@ -1,8 +1,6 @@
 from pathlib import Path
 import tkinter as tk
-from tkinter import filedialog, ttk
-
-import messagebox
+from tkinter import filedialog, messagebox, ttk
 
 from scenarios.paths import (
     UnknownScenarioExtensionError,
@@ -16,19 +14,19 @@ class ScenarioSaveFrame(ttk.LabelFrame):
     def __init__(self, parent, manager):
         super().__init__(
             parent,
-            text="Scenario Management",
+            text="Configuration Management",
             style="Section.TLabelframe",
             padding=(12, 8),
         )
         self.manager = manager
         self.connected = False
         self.pending = False
-        self.name_var = tk.StringVar(value="Scenario")
+        self.name_var = tk.StringVar(value="Configuration")
         self.path_var = tk.StringVar(value="")
         self.format_var = tk.StringVar(value="JSON")
         self.clear_mode_var = tk.StringVar(value="Managed Actors Only")
         self.status_var = tk.StringVar(
-            value="Connect to CARLA to manage scenarios."
+            value="Connect to CARLA to manage configurations."
         )
         self._updating_path = False
         self._path_filename_manual = False
@@ -39,7 +37,7 @@ class ScenarioSaveFrame(ttk.LabelFrame):
 
     def _create_widgets(self):
         self.grid_columnconfigure(3, weight=1)
-        ttk.Label(self, text="Name:").grid(
+        ttk.Label(self, text="Configuration Name:").grid(
             row=0, column=0, padx=(0, 5), pady=4, sticky="w"
         )
         self.name_entry = ttk.Entry(
@@ -84,7 +82,7 @@ class ScenarioSaveFrame(ttk.LabelFrame):
         self.browse_button.grid(row=1, column=4, padx=(0, 8), pady=4)
         self.save_button = ttk.Button(
             self,
-            text="Save Scenario",
+            text="Save Configuration",
             command=self.save,
             state="disabled",
         )
@@ -144,7 +142,7 @@ class ScenarioSaveFrame(ttk.LabelFrame):
         )
         self.load_button = ttk.Button(
             self,
-            text="Load Scenario",
+            text="Load Configuration",
             command=self.load_scenario,
             state="disabled",
         )
@@ -161,13 +159,13 @@ class ScenarioSaveFrame(ttk.LabelFrame):
         file_format = self.format_var.get().lower()
         extension = ".json" if file_format == "json" else ".yaml"
         filetypes = (
-            (("JSON scenario", "*.json"), ("All files", "*.*"))
+            (("JSON configuration", "*.json"), ("All files", "*.*"))
             if file_format == "json"
-            else (("YAML scenario", "*.yaml *.yml"), ("All files", "*.*"))
+            else (("YAML configuration", "*.yaml *.yml"), ("All files", "*.*"))
         )
         path = filedialog.asksaveasfilename(
             parent=self,
-            title="Save CARLA scenario",
+            title="Save CARLA configuration",
             defaultextension=extension,
             initialfile=(
                 f"{sanitize_scenario_filename(self.name_var.get())}"
@@ -233,12 +231,12 @@ class ScenarioSaveFrame(ttk.LabelFrame):
         except UnknownScenarioExtensionError as error:
             if not confirm_unknown:
                 messagebox.showwarning(
-                    "Scenario file extension",
+                    "Configuration file extension",
                     f"{error}\nThe path has not been changed.",
                 )
                 return False
             if not messagebox.askyesno(
-                "Scenario file extension",
+                "Configuration file extension",
                 f"{error}\n\nUse the suggested file name?",
             ):
                 return False
@@ -257,8 +255,8 @@ class ScenarioSaveFrame(ttk.LabelFrame):
         file_format = self.format_var.get().strip().lower()
         if not name:
             messagebox.showerror(
-                "Save Scenario",
-                "Scenario name cannot be empty.",
+                "Save Configuration",
+                "Configuration name cannot be empty.",
             )
             return
         if not path:
@@ -274,8 +272,8 @@ class ScenarioSaveFrame(ttk.LabelFrame):
             target.exists()
             and target_key != self._overwrite_confirmed_path
             and not messagebox.askyesno(
-                "Overwrite Scenario",
-                f"The scenario file already exists:\n{target}\n\n"
+                "Overwrite Configuration",
+                f"The configuration file already exists:\n{target}\n\n"
                 "Overwrite it?",
             )
         ):
@@ -302,12 +300,12 @@ class ScenarioSaveFrame(ttk.LabelFrame):
         self.connected = bool(connected)
         if not self.connected:
             self.pending = False
-            self.status_var.set("Connect to CARLA to manage scenarios.")
+            self.status_var.set("Connect to CARLA to manage configurations.")
         self._update_widget_state()
 
     def set_pending(self):
         self.pending = True
-        self.status_var.set("Capturing and saving scenario...")
+        self.status_var.set("Capturing and saving configuration...")
         self._update_widget_state()
 
     def set_clear_pending(self, status="Preparing Clear World preflight..."):
@@ -315,7 +313,7 @@ class ScenarioSaveFrame(ttk.LabelFrame):
         self.status_var.set(status)
         self._update_widget_state()
 
-    def set_load_pending(self, status="Validating scenario..."):
+    def set_load_pending(self, status="Validating configuration..."):
         self.pending = True
         self.status_var.set(status)
         self._update_widget_state()
@@ -328,13 +326,13 @@ class ScenarioSaveFrame(ttk.LabelFrame):
 
     def show_load_cancelled(self):
         self.pending = False
-        self.status_var.set("Scenario Load cancelled; the world was not changed.")
+        self.status_var.set("Configuration Load cancelled; the world was not changed.")
         self._update_widget_state()
 
     def show_load_report(self, report):
         self.pending = False
         self.status_var.set(
-            f"Scenario Load {report.get('status', 'failed')}: restored "
+            f"Configuration Load {report.get('status', 'failed')}: restored "
             f"{report.get('restored', 0)}/{report.get('planned', 0)}, "
             f"skipped {report.get('skipped', 0)}, failed "
             f"{report.get('failed', 0)}."
@@ -343,7 +341,7 @@ class ScenarioSaveFrame(ttk.LabelFrame):
 
     def show_load_error(self, message):
         self.pending = False
-        self.status_var.set(f"Scenario Load failed: {message}")
+        self.status_var.set(f"Configuration Load failed: {message}")
         self._update_widget_state()
 
     def show_clear_preflight(self, plan):
@@ -634,9 +632,12 @@ class SimulationControlFrame(ttk.Frame):
             padx=(12, 8),
         )
 
-        for column in range(5):
-            settings_frame.grid_columnconfigure(column, weight=1)
-            self.advanced_frame.grid_columnconfigure(column, weight=1)
+        # Let entry columns absorb extra width.  Giving every label column the
+        # same weight produced large gaps on laptop-wide and scaled displays.
+        settings_frame.grid_columnconfigure(1, weight=1)
+        settings_frame.grid_columnconfigure(3, weight=1)
+        self.advanced_frame.grid_columnconfigure(2, weight=1)
+        self.advanced_frame.grid_columnconfigure(4, weight=1)
 
         control_frame = ttk.LabelFrame(
             self,
@@ -723,7 +724,7 @@ class SimulationControlFrame(ttk.Frame):
             padx=4,
             pady=(4, 2),
         )
-        for column in range(6):
+        for column in (0, 1, 2, 4, 5):
             control_frame.grid_columnconfigure(column, weight=1)
 
         self.scenario_frame = ScenarioSaveFrame(self, self.manager)

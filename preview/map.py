@@ -1,12 +1,52 @@
 # Canonical implementation; the legacy path is a compatibility shim.
 import hashlib
 import math
+import os
 import re
+import sys
+import tempfile
 from collections import defaultdict
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from PIL import Image, ImageDraw
 from PIL.PngImagePlugin import PngInfo
+
+
+def user_cache_root(platform_name=None, environ=None, home=None):
+    """Return a writable per-user cache root for the current platform."""
+    platform_name = platform_name or sys.platform
+    environ = os.environ if environ is None else environ
+
+    if platform_name.startswith("win"):
+        configured = str(environ.get("LOCALAPPDATA", "")).strip()
+        if configured:
+            base = Path(configured)
+        else:
+            try:
+                profile = Path.home() if home is None else Path(home)
+            except RuntimeError:
+                profile = None
+            base = (
+                profile / "AppData" / "Local"
+                if profile is not None
+                else Path(tempfile.gettempdir())
+            )
+        return base / "CARLA Simulator Manager" / "Cache"
+
+    configured = str(environ.get("XDG_CACHE_HOME", "")).strip()
+    if configured and PurePosixPath(configured).is_absolute():
+        base = Path(configured)
+    else:
+        try:
+            profile = Path.home() if home is None else Path(home)
+        except RuntimeError:
+            profile = None
+        base = (
+            profile / ".cache"
+            if profile is not None
+            else Path(tempfile.gettempdir())
+        )
+    return base / "carla-simulator-manager"
 
 
 def carla_yaw_to_image_direction(yaw):
@@ -64,8 +104,9 @@ class MapPreviewCache:
     def __init__(self, directory=None):
         project_root = Path(__file__).resolve().parent.parent
         if directory is None:
-            self.directory = project_root / "resources" / "maps" / "generated"
+            self.directory = user_cache_root() / "maps" / "generated"
             self.legacy_directories = (
+                project_root / "resources" / "maps" / "generated",
                 project_root / "images" / "maps" / "generated",
             )
         else:
@@ -145,8 +186,15 @@ class MapPreviewCache:
     def save(self, map_name, image):
         path = self.path_for(map_name)
         path.parent.mkdir(parents=True, exist_ok=True)
-        temporary_path = path.with_suffix(".tmp.png")
+        temporary_path = None
         try:
+            with tempfile.NamedTemporaryFile(
+                dir=path.parent,
+                prefix=f".{path.stem}-",
+                suffix=".tmp.png",
+                delete=False,
+            ) as temporary:
+                temporary_path = Path(temporary.name)
             metadata = PngInfo()
             metadata.add_text(
                 self.TRANSFORM_METADATA_KEY,
@@ -159,10 +207,11 @@ class MapPreviewCache:
             )
             temporary_path.replace(path)
         finally:
-            try:
-                temporary_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+            if temporary_path is not None:
+                try:
+                    temporary_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
         return path
 
 

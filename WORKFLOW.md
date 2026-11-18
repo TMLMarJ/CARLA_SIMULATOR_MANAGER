@@ -113,7 +113,9 @@ Raporty implementacyjne w `docs/implementation/` są lokalną historią projektu
 ## 8. Zasoby i dane użytkownika
 
 - Dostarczane mapy znajdują się w `resources/maps/bundled/`.
-- Generowany cache trafia do `resources/maps/generated/`.
+- Generowany cache trafia do katalogu użytkownika: LocalAppData na Windows albo
+  XDG Cache/`~/.cache` na Linuxie. Katalogi `resources/maps/generated/` i
+  `images/maps/generated/` pozostają wyłącznie źródłami zgodności do odczytu.
 - Starszy cache `images/maps/generated/` może być nadal odczytywany dla zgodności danych.
 - Nie należy usuwać ani automatycznie przenosić scenariuszy, cache ani innych danych użytkownika.
 

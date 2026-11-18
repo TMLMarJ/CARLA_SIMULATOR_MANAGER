@@ -4,6 +4,8 @@ from tkinter import ttk
 
 from PIL import Image, ImageTk
 
+from gui.widgets.scrolling import mousewheel_steps
+
 from preview.map import MapImageTransform, carla_yaw_to_image_direction
 
 
@@ -326,7 +328,10 @@ class NavigationMap(ttk.Frame):
     def _mousewheel(self, event):
         if self.viewport is None:
             return
-        if getattr(event, "num", None) == 5 or getattr(event, "delta", 0) < 0:
+        steps = mousewheel_steps(event)
+        if steps == 0:
+            return
+        if steps < 0:
             factor = 1.0 / 1.2
         else:
             factor = 1.2

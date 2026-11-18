@@ -1,4 +1,5 @@
 import datetime
+import math
 import tkinter as tk
 from tkinter import ttk
 
@@ -24,7 +25,8 @@ class SimulationDashboardFrame(ttk.Frame):
             "state": tk.StringVar(value="Disconnected"),
             "frame": tk.StringVar(value="-"),
             "elapsed": tk.StringVar(value="-"),
-            "delta": tk.StringVar(value="-"),
+            "delta": tk.StringVar(value="N/A"),
+            "fps": tk.StringVar(value="N/A"),
             "map": tk.StringVar(value="-"),
             "synchronization": tk.StringVar(value="-"),
             "tick_controller": tk.StringVar(value="-"),
@@ -60,6 +62,7 @@ class SimulationDashboardFrame(ttk.Frame):
             ("Elapsed Simulation Time", "elapsed"),
             ("Delta Time", "delta"),
             ("Map Name", "map"),
+            ("Simulation FPS", "fps"),
             ("Synchronization Mode", "synchronization"),
             ("Tick Controller", "tick_controller"),
         )
@@ -300,7 +303,12 @@ class SimulationDashboardFrame(ttk.Frame):
             self.format_seconds(simulation_snapshot.get("elapsed_seconds"))
         )
         self.simulation_vars["delta"].set(
-            self.format_seconds(simulation_snapshot.get("delta_seconds"), 4)
+            self.format_seconds(simulation_snapshot.get("delta_seconds"))
+        )
+        self.simulation_vars["fps"].set(
+            self.format_simulation_fps(
+                simulation_snapshot.get("simulation_fps")
+            )
         )
         self.simulation_vars["map"].set(simulation_snapshot.get("map_name") or "-")
         synchronous = simulation_snapshot.get("synchronous_mode")
@@ -388,6 +396,8 @@ class SimulationDashboardFrame(ttk.Frame):
             self.simulation_vars["state"].set(self.context_status or "Disconnected")
         for key in ("frame", "elapsed", "delta", "map", "synchronization", "tick_controller"):
             self.simulation_vars[key].set("-")
+        self.simulation_vars["delta"].set("N/A")
+        self.simulation_vars["fps"].set("N/A")
         self._clear_actor_table()
         self._update_sensor_table([])
         self._update_external_actors({"actors": []})
@@ -552,6 +562,16 @@ class SimulationDashboardFrame(ttk.Frame):
     def format_seconds(cls, value, decimals=3):
         formatted = cls.format_number(value, decimals)
         return "-" if formatted == "-" else f"{formatted} s"
+
+    @staticmethod
+    def format_simulation_fps(value):
+        try:
+            fps = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return "N/A"
+        if fps < 0 or not math.isfinite(fps):
+            return "N/A"
+        return f"{fps:.1f}"
 
     @staticmethod
     def format_timestamp(value):

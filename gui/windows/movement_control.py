@@ -118,7 +118,9 @@ class MovementControlWindow(tk.Toplevel):
             )
         )
         self.vehicle_speed_var = tk.StringVar(
-            value=f"{float(initial_control_state.get('current_speed', 0.0)):.1f} m/s"
+            value=self._format_vehicle_speed(
+                initial_control_state.get("current_speed", 0.0)
+            )
         )
         self.preview_state_var = tk.StringVar(value="Starting preview...")
         self.camera_preset_var = tk.StringVar(value=initial_preset)
@@ -607,6 +609,10 @@ class MovementControlWindow(tk.Toplevel):
         speed = float(speed)
         return str(int(speed)) if speed.is_integer() else f"{speed:g}"
 
+    @staticmethod
+    def _format_vehicle_speed(speed_metres_per_second):
+        return f"{float(speed_metres_per_second) * 3.6:.1f} km/h"
+
     def _basic_agent_settings_from_controls(self):
         if self.destination_executor != self.BASIC_AGENT_EXECUTOR:
             return None
@@ -986,7 +992,9 @@ class MovementControlWindow(tk.Toplevel):
             "—" if distance is None else f"{float(distance):.1f} m"
         )
         self.vehicle_speed_var.set(
-            f"{float(control_state.get('current_speed', 0.0)):.1f} m/s"
+            self._format_vehicle_speed(
+                control_state.get("current_speed", 0.0)
+            )
         )
         self.navigation_route = control_state.get("route")
         if "destination" in control_state:

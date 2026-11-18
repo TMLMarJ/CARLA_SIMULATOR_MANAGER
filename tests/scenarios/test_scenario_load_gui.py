@@ -86,7 +86,9 @@ class ScenarioLoadGuiTests(unittest.TestCase):
             "load-token",
             confirmed=True,
         )
-        frame.set_load_pending.assert_called_once_with("Loading scenario...")
+        frame.set_load_pending.assert_called_once_with(
+            "Loading configuration..."
+        )
 
     @mock.patch("gui.application.messagebox.askyesno", return_value=False)
     def test_cancellation_does_not_call_execute(self, _confirm):

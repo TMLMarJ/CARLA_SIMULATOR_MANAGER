@@ -416,9 +416,11 @@ class MovementControlSessionManager:
                             f"Preview active — {data['preset']} camera."
                         )
                 elif status == "vehicle_control_state":
+                    self.preview.publish_telemetry(data["control_state"])
                     if self.window is not None and not self.closing:
                         self.window.set_control_state(data["control_state"])
                 elif status == "vehicle_control_error":
+                    self.preview.publish_telemetry(data["control_state"])
                     if self.window is not None and not self.closing:
                         self.window.set_control_state(data["control_state"])
                     self._show_error(

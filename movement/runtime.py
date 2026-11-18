@@ -78,6 +78,7 @@ class MovementRuntime:
         "CARLA_MANAGER_BASIC_AGENT_ADAPTIVE_SPEED"
     )
     BASIC_AGENT_CONTROL_INTERVAL_SECONDS = 1.0 / 20.0
+    MOVEMENT_TELEMETRY_INTERVAL_SECONDS = 0.1
     BASIC_AGENT_CURVATURE_SPAN_METERS = 6.0
     BASIC_AGENT_CURVATURE_THRESHOLD = 0.01
     BASIC_AGENT_CURVE_LATERAL_ACCELERATION = 1.5
@@ -2143,6 +2144,37 @@ class MovementRuntime:
         except Exception as error:
             self._manual_control_failure(error)
 
+    def _service_movement_vehicle_telemetry(self):
+        actor_id = getattr(self, "movement_preview_actor_id", None)
+        if actor_id is None:
+            return
+        now = time.monotonic()
+        if now < getattr(self, "movement_telemetry_next_update", 0.0):
+            return
+        self.movement_telemetry_next_update = (
+            now + self.MOVEMENT_TELEMETRY_INTERVAL_SECONDS
+        )
+        try:
+            actor = self._get_managed_vehicle(actor_id)
+            control = actor.get_control()
+            with self.database.lock:
+                state = self.database.vehicle_control_states.get(actor_id)
+                if state is None:
+                    return
+                state.update({
+                    "current_speed": self._vehicle_speed(actor),
+                    "throttle": float(getattr(control, "throttle", 0.0)),
+                    "brake": float(getattr(control, "brake", 0.0)),
+                    "steer": float(getattr(control, "steer", 0.0)),
+                    "gear": int(getattr(control, "gear", 0)),
+                    "hand_brake": bool(getattr(control, "hand_brake", False)),
+                    "reverse": bool(getattr(control, "reverse", False)),
+                })
+            self._publish_vehicle_control_state(actor_id)
+        except Exception:
+            # Actor/world lifecycle handlers own diagnostics and teardown.
+            return
+
     def _manual_control_failure(self, error):
         actor_id = self.movement_preview_actor_id
         self.dashboard_monitor.record_error(error)
@@ -3588,6 +3620,7 @@ class MovementRuntime:
             self.manual_control_command = None
             self.manual_control_received_at = None
             self.manual_control_input_fresh = False
+            self.movement_telemetry_next_update = 0.0
             self.database.movement_event_queue.put((
                 "movement_camera_started",
                 {
@@ -3757,6 +3790,7 @@ class MovementRuntime:
         self.manual_control_command = None
         self.manual_control_received_at = None
         self.manual_control_input_fresh = False
+        self.movement_telemetry_next_update = 0.0
 
         if session_id is not None:
             self.database.movement_event_queue.put((

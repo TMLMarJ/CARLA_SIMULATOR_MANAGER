@@ -47,9 +47,13 @@ class ControllerRuntimeDelegationTests(unittest.TestCase):
 
     def test_scenario_sync_handler_runs_inline_on_controller_instance(self):
         controller = CarlaController.__new__(CarlaController)
-        controller._perform_world_sync = mock.Mock(return_value={})
+        controller._refresh_world_from_server = mock.Mock()
         world = object()
         blueprint_library = object()
+        controller._refresh_world_from_server.return_value = (
+            world,
+            blueprint_library,
+        )
 
         result = controller._handle_scenario_runtime_command(
             "sync_world",
@@ -59,8 +63,9 @@ class ControllerRuntimeDelegationTests(unittest.TestCase):
         )
 
         self.assertEqual((world, blueprint_library), result)
-        controller._perform_world_sync.assert_called_once_with(
+        controller._refresh_world_from_server.assert_called_once_with(
             world,
+            blueprint_library,
             reason="manual",
         )
 
