@@ -9,7 +9,12 @@ from preview.movement import (
     CAMERA_PRESETS,
     LatestFramePublisher,
     ManualControlSmoother,
+    MovementPreviewProcess,
     camera_transform_for_actor,
+    clamp_preview_window_size,
+    contained_image_geometry,
+    movement_hud_geometry,
+    resize_movement_display,
 )
 
 
@@ -106,6 +111,92 @@ class FakePublisher:
 
     def close(self):
         self.closed = True
+
+
+class FakeDisplay:
+    def __init__(self):
+        self.calls = []
+
+    def set_mode(self, size, flags):
+        self.calls.append((size, flags))
+        return SimpleNamespace(size=size)
+
+
+class FakePygame:
+    RESIZABLE = 16
+
+    def __init__(self):
+        self.display = FakeDisplay()
+
+
+class FakeStopEvent:
+    def __init__(self):
+        self.value = False
+
+    def is_set(self):
+        return self.value
+
+    def set(self):
+        self.value = True
+
+
+class MovementPreviewGeometryTests(unittest.TestCase):
+    def test_contain_preserves_aspect_ratio_for_square_and_wide_windows(self):
+        self.assertEqual(
+            (0, 219, 1000, 562),
+            contained_image_geometry((800, 450), (1000, 1000)),
+        )
+        self.assertEqual(
+            (244, 0, 711, 400),
+            contained_image_geometry((800, 450), (1200, 400)),
+        )
+
+    def test_contain_never_crops_the_camera_image(self):
+        for window_size in ((480, 270), (600, 900), (1600, 500)):
+            with self.subTest(window_size=window_size):
+                x, y, width, height = contained_image_geometry(
+                    (800, 450),
+                    window_size,
+                )
+                self.assertGreaterEqual(x, 0)
+                self.assertGreaterEqual(y, 0)
+                self.assertLessEqual(x + width, window_size[0])
+                self.assertLessEqual(y + height, window_size[1])
+                self.assertAlmostEqual(
+                    800 / 450,
+                    width / height,
+                    delta=0.01,
+                )
+
+    def test_resize_clamps_minimum_and_keeps_resizable_flag(self):
+        self.assertEqual((480, 270), clamp_preview_window_size((100, 50)))
+        pygame = FakePygame()
+
+        _screen, size = resize_movement_display(pygame, (320, 200))
+
+        self.assertEqual((480, 270), size)
+        self.assertEqual([((480, 270), pygame.RESIZABLE)], pygame.display.calls)
+
+    def test_hud_stays_inside_window_after_resize(self):
+        for window_size in ((480, 270), (800, 450), (1400, 600)):
+            with self.subTest(window_size=window_size):
+                x, y, width, height = movement_hud_geometry(window_size)
+                self.assertGreaterEqual(x, 0)
+                self.assertGreaterEqual(y, 0)
+                self.assertLessEqual(x + width, window_size[0])
+                self.assertLessEqual(y + height, window_size[1])
+                self.assertEqual((310, 205), (width, height))
+
+    def test_resize_does_not_change_preview_stop_lifecycle(self):
+        pygame = FakePygame()
+        resize_movement_display(pygame, (1200, 700))
+        preview = MovementPreviewProcess.__new__(MovementPreviewProcess)
+        preview.process = object()
+        preview.stop_event = FakeStopEvent()
+        preview.stop_requested_at = None
+
+        self.assertTrue(preview.request_stop())
+        self.assertTrue(preview.stop_event.is_set())
 
 
 class MovementCameraPresetTests(unittest.TestCase):

@@ -1,14 +1,24 @@
 # Instalacja CARLA Simulator Manager
 
+Instrukcja pierwszego uruchomienia dla początkującego użytkownika, obejmująca
+pobranie serwera i projektu, znajduje się w [README](README.md). Poniższy
+dokument rozwija konfigurację środowiska Windows. Procedura Linux znajduje się
+w [docs/LINUX_SETUP.md](docs/LINUX_SETUP.md), a zakres jej rzeczywistej
+weryfikacji w [audycie](docs/implementation/LINUX_COMPATIBILITY_AUDIT.md).
+
 ## Wymagania środowiskowe
 
-- Windows z Pythonem zgodnym z CARLA 0.9.16;
-- CARLA 0.9.16;
+- Windows z Pythonem zgodnym z używanym wheel CARLA Python API;
+- CARLA 0.9.15 albo 0.9.16; wersją referencyjną pozostaje 0.9.16;
 - Tkinter dostępny w instalacji Pythona;
 - importowalny moduł `carla` zgodny z serwerem oraz oficjalny katalog
   `PythonAPI/carla/agents` z tej samej instalacji.
 
 Projekt nie instaluje ani nie uruchamia serwera CARLA automatycznie.
+
+Zalecane pary środowisk to Python 3.10 dla CARLA 0.9.15 oraz Python 3.12 dla
+CARLA 0.9.16. Inne interpretery należy dobierać wyłącznie wtedy, gdy istnieje
+dla nich oficjalny wheel dokładnie tej wersji CARLA.
 
 ## Środowisko Python
 
@@ -20,7 +30,27 @@ python -m venv .venv
 python -m pip install -r requirements.txt
 ```
 
-`requirements.txt` deklaruje wersjonowane zależności PyYAML i Pillow. Kod używa również pakietów dostarczanych przez środowisko CARLA lub instalowanych osobno: `carla`, NumPy, Matplotlib, Pygame i Pygments. Projekt nie określa ich wersji, dlatego należy dobrać je do używanej dystrybucji CARLA i interpretera zamiast instalować przypadkowe wersje. Nie należy instalować przypadkowego pakietu `agents` z innej dystrybucji.
+`requirements.txt` zawiera niewersjonowaną listę pakietów używanych przez
+środowisko aplikacji, m.in. PyYAML, Pillow, NumPy, Matplotlib, Pygame i Pygments.
+Wpis `carla` jest zakomentowaną lokalną ścieżką do wheel 0.9.16, a więc nie
+instaluje przenośnie CARLA. Wheel oraz oficjalny katalog `agents` należy dobrać
+do interpretera i używanej dystrybucji serwera.
+
+Zaobserwowane środowiska repozytorium to CPython 3.12.10 + `carla 0.9.16` w
+`.venv` oraz CPython 3.10.11 + `carla 0.9.15` w `venvv15`. Są to konfiguracje
+lokalne, nie wynik zaliczonych testów E2E.
+
+Moduł CARLA należy zainstalować osobno, odpowiednio do serwera:
+
+```powershell
+python -m pip install "carla==0.9.16"
+```
+
+albo w środowisku Python 3.10 dla starszego serwera:
+
+```powershell
+python -m pip install "carla==0.9.15"
+```
 
 ## CARLA Python API
 
@@ -108,10 +138,13 @@ Testy automatyczne używają fake'ów i mocków. Nie potwierdzają zgodności si
 ## Typowe problemy
 
 - **`ModuleNotFoundError: carla`** — moduł CARLA nie jest dostępny w aktywnym interpreterze.
-- **Brak GlobalRoutePlanner lub BasicAgent** — ustaw poprawnie `CARLA_PYTHONAPI_PATH` lub `CARLA_ROOT`, sprawdź zgodność z CARLA 0.9.16 i uruchom aplikację ponownie.
+- **Brak GlobalRoutePlanner lub BasicAgent** — ustaw poprawnie `CARLA_PYTHONAPI_PATH` lub `CARLA_ROOT`, sprawdź zgodność katalogu `agents`, wheel i serwera, a następnie uruchom aplikację ponownie.
 - **Konflikt modułu `agents`** — usuń z `sys.path` inną paczkę o tej nazwie; resolver odrzuca planer załadowany spoza skonfigurowanego PythonAPI.
 - **Brak Tkinter/Pygame** — użyj interpretera z Tkinter i doinstaluj zależności podglądów zgodne z CARLA.
 - **Timeout połączenia** — sprawdź, czy serwer działa, port jest dostępny i GUI wskazuje właściwy host.
 - **Błąd portu Traffic Managera** — zarezerwuj osobny wolny port dla każdej instancji aplikacji korzystającej z ekskluzywnego TM.
 - **Brak RSS** — aktualny build CARLA Python client nie udostępnia RSS; aplikacja informuje, że taki podgląd jest niedostępny.
-- **Brak starego cache map** — aplikacja czyta także dotychczasowy katalog `images/maps/generated/`, a nowe obrazy zapisuje w `resources/maps/generated/`.
+- **Brak starego cache map** — aplikacja nadal czyta dotychczasowe katalogi
+  `resources/maps/generated/` i `images/maps/generated/`. Nowe obrazy zapisuje
+  w cache użytkownika: `%LOCALAPPDATA%\CARLA Simulator Manager\Cache` na
+  Windows albo `$XDG_CACHE_HOME/carla-simulator-manager`/`~/.cache` na Linuxie.

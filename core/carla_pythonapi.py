@@ -28,7 +28,7 @@ def resolve_carla_pythonapi_path():
     if configured is None:
         return None, (
             "CARLA GlobalRoutePlanner is unavailable. Set "
-            f"{CARLA_PYTHONAPI_ENV} to the local CARLA 0.9.16 "
+            f"{CARLA_PYTHONAPI_ENV} to the matching CARLA 0.9.15 or 0.9.16 "
             "PythonAPI/carla directory (or set CARLA_ROOT to the CARLA "
             "installation directory), then restart the application."
         )
@@ -58,7 +58,7 @@ def resolve_carla_pythonapi_path():
 
     return None, (
         f"CARLA GlobalRoutePlanner is unavailable. {source} points to "
-        f"'{configured}', but the official CARLA 0.9.16 file "
+        f"'{configured}', but the matching CARLA PythonAPI file "
         "agents/navigation/global_route_planner.py was not found. Configure "
         f"{CARLA_PYTHONAPI_ENV} with the PythonAPI/carla directory and "
         "restart the application."
@@ -93,7 +93,8 @@ def load_global_route_planner():
         return None, (
             "CARLA GlobalRoutePlanner could not be imported from "
             f"'{pythonapi_path}': {import_error}. Verify that the configured "
-            "PythonAPI belongs to CARLA 0.9.16 and restart the application."
+            "PythonAPI matches CARLA 0.9.15 or 0.9.16 and restart the "
+            "application."
         )
     module_file = getattr(module, "__file__", None)
     try:
@@ -132,7 +133,7 @@ def load_basic_agent():
     )
     if not agent_file.is_file():
         return None, (
-            "CARLA BasicAgent is unavailable. The configured CARLA 0.9.16 "
+            "CARLA BasicAgent is unavailable. The configured CARLA "
             f"PythonAPI directory '{pythonapi_path}' does not contain "
             "agents/navigation/basic_agent.py."
         )
@@ -148,7 +149,8 @@ def load_basic_agent():
         return None, (
             "CARLA BasicAgent could not be imported from "
             f"'{pythonapi_path}': {import_error}. Verify that the configured "
-            "PythonAPI belongs to CARLA 0.9.16 and restart the application."
+            "PythonAPI matches CARLA 0.9.15 or 0.9.16 and restart the "
+            "application."
         )
     module_file = getattr(module, "__file__", None)
     try:

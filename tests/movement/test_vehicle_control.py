@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from core.controller import CarlaController
 from movement.vehicle import (
     AUTOPILOT,
+    AUTOPILOT_DESTINATION,
     AUTOPILOT_FREE_ROAM,
     MANUAL_CONTROL,
     NO_CONTROL,
@@ -20,12 +21,27 @@ class FakeVehicle:
         self.is_alive = True
         self.controls = []
         self.autopilot_calls = []
+        self.velocity = SimpleNamespace(x=10.0, y=0.0, z=0.0)
+        self.control = SimpleNamespace(
+            throttle=0.6,
+            brake=0.1,
+            steer=-0.2,
+            gear=2,
+            hand_brake=False,
+            reverse=False,
+        )
 
     def apply_control(self, control):
         self.controls.append(control)
 
     def set_autopilot(self, enabled, port):
         self.autopilot_calls.append((enabled, port))
+
+    def get_velocity(self):
+        return self.velocity
+
+    def get_control(self):
+        return self.control
 
 
 class FakeTrafficManager:
@@ -87,6 +103,7 @@ class VehicleControlTests(unittest.TestCase):
         self.controller.manual_control_received_at = None
         self.controller.manual_control_next_apply = 0.0
         self.controller.manual_control_input_fresh = False
+        self.controller.movement_telemetry_next_update = 0.0
         self.world = FakeWorld(synchronous_mode=True)
 
     def change_mode(self, mode):
@@ -179,6 +196,21 @@ class VehicleControlTests(unittest.TestCase):
         self.controller._update_traffic_manager_sync(self.world)
 
         self.assertEqual([True, False], self.traffic_manager.sync_modes)
+
+    def test_actual_telemetry_is_refreshed_in_all_vehicle_modes(self):
+        for mode in (MANUAL_CONTROL, AUTOPILOT_FREE_ROAM, AUTOPILOT_DESTINATION):
+            with self.subTest(mode=mode):
+                self.controller.database.vehicle_control_states[7]["mode"] = mode
+                self.controller.movement_telemetry_next_update = 0.0
+
+                self.controller._service_movement_vehicle_telemetry()
+
+                state = self.controller.database.vehicle_control_states[7]
+                self.assertEqual(10.0, state["current_speed"])
+                self.assertEqual(0.6, state["throttle"])
+                self.assertEqual(0.1, state["brake"])
+                self.assertEqual(-0.2, state["steer"])
+                self.assertEqual(2, state["gear"])
 
 
 if __name__ == "__main__":

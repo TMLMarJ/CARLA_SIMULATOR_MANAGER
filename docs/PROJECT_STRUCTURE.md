@@ -89,7 +89,7 @@ Usługi nie tworzą własnych workerów ani klientów CARLA. Są wywoływane w w
 - `pedestrians.py` — piesi;
 - `static_objects.py` — obiekty statyczne;
 - `sensors.py` — sensory;
-- `simulation.py` — Scenario Management i Simulation Control.
+- `simulation.py` — Configuration Management i Simulation Control.
 
 ### `gui/windows/`
 
@@ -124,7 +124,7 @@ Usługi nie tworzą własnych workerów ani klientów CARLA. Są wywoływane w w
 | `runtime.py` | Tick scheduler oraz wykonawcze handlery symulacji. |
 | `dashboard.py` | Budowanie snapshotów dashboardu. |
 
-## `scenarios/` — Scenario Management
+## `scenarios/` — Configuration Management
 
 | Plik | Odpowiedzialność |
 |---|---|

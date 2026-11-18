@@ -1,3 +1,4 @@
+import math
 import tkinter as tk
 from typing import List, Any
 
@@ -201,13 +202,21 @@ class EntityEditWindow(tk.Toplevel):
     def create_torque_section(self):
         # Torque Curve
         torque_table = TorqueCurveTable(self.torque_parameters_frame, self.physic.torque_curve)
-        torque_table.grid(row=0, column=0, sticky="w", padx=20)
+        torque_table.grid(row=0, column=0, sticky="nsew", padx=20, pady=(0, 10))
+        self.TorqueTab.grid_columnconfigure(0, weight=1)
+        self.TorqueTab.grid_rowconfigure(0, weight=1)
+        self.torque_parameters_frame.grid_columnconfigure(0, weight=1)
+        self.torque_parameters_frame.grid_rowconfigure(0, weight=1)
         return torque_table
 
     def create_steering_section(self):
         # Steering Curve
         steering_table = SteeringCurveTable(self.steering_parameters_frame, self.physic.steering_curve)
-        steering_table.grid(row=0, column=0, sticky="w", padx=20)
+        steering_table.grid(row=0, column=0, sticky="nsew", padx=20, pady=(0, 10))
+        self.SteeringTab.grid_columnconfigure(0, weight=1)
+        self.SteeringTab.grid_rowconfigure(0, weight=1)
+        self.steering_parameters_frame.grid_columnconfigure(0, weight=1)
+        self.steering_parameters_frame.grid_rowconfigure(0, weight=1)
         return steering_table
 
     def create_wheels_section(self):
@@ -566,6 +575,193 @@ class GearManagerTable(ttk.Frame):
             gears.append(carla.GearPhysicsControl(ratio, down_ratio, up_ratio))
         return gears
 
+class CurvePreview(ttk.Frame):
+    """Small event-driven Canvas plot used by vehicle physics tables."""
+
+    def __init__(self, parent, x_label, y_label):
+        super().__init__(parent)
+        self.x_label = x_label
+        self.y_label = y_label
+        self.points = []
+        self.canvas = tk.Canvas(
+            self,
+            width=390,
+            height=260,
+            background="#FFF8EF",
+            highlightthickness=1,
+            highlightbackground="#E7B36C",
+        )
+        self.canvas.pack(fill="both", expand=True)
+        self.canvas.bind("<Configure>", lambda _event: self.redraw())
+
+    @staticmethod
+    def normalized_points(rows, x_scale=1.0):
+        points = []
+        for row in rows:
+            try:
+                x_value = float(row[0]) * float(x_scale)
+                y_value = float(row[1])
+            except (IndexError, TypeError, ValueError):
+                continue
+            if math.isfinite(x_value) and math.isfinite(y_value):
+                points.append((x_value, y_value))
+        return sorted(points, key=lambda point: point[0])
+
+    def update_points(self, rows, x_scale=1.0):
+        self.points = self.normalized_points(rows, x_scale=x_scale)
+        self.redraw()
+
+    @staticmethod
+    def _nice_number(value, rounded):
+        if not math.isfinite(value) or value <= 0:
+            return 1.0
+        exponent = math.floor(math.log10(value))
+        fraction = value / (10 ** exponent)
+        if rounded:
+            nice_fraction = (
+                1.0 if fraction < 1.5
+                else 2.0 if fraction < 3.0
+                else 5.0 if fraction < 7.0
+                else 10.0
+            )
+        else:
+            nice_fraction = (
+                1.0 if fraction <= 1.0
+                else 2.0 if fraction <= 2.0
+                else 5.0 if fraction <= 5.0
+                else 10.0
+            )
+        return nice_fraction * (10 ** exponent)
+
+    @classmethod
+    def axis_ticks(cls, minimum, maximum, target_count=6):
+        try:
+            minimum = float(minimum)
+            maximum = float(maximum)
+        except (TypeError, ValueError, OverflowError):
+            minimum, maximum = 0.0, 1.0
+        if not math.isfinite(minimum) or not math.isfinite(maximum):
+            minimum, maximum = 0.0, 1.0
+        if maximum < minimum:
+            minimum, maximum = maximum, minimum
+        if maximum == minimum:
+            margin = max(abs(minimum) * 0.1, 1.0)
+            minimum -= margin
+            maximum += margin
+
+        nice_range = cls._nice_number(maximum - minimum, rounded=False)
+        spacing = cls._nice_number(
+            nice_range / max(1, int(target_count) - 1),
+            rounded=True,
+        )
+        axis_minimum = math.floor(minimum / spacing) * spacing
+        axis_maximum = math.ceil(maximum / spacing) * spacing
+        count = min(100, int(round(
+            (axis_maximum - axis_minimum) / spacing
+        )) + 1)
+        ticks = [axis_minimum + index * spacing for index in range(count)]
+        return axis_minimum, axis_maximum, ticks
+
+    @staticmethod
+    def format_tick(value):
+        if abs(value) < 1e-12:
+            value = 0.0
+        magnitude = abs(value)
+        if magnitude and (magnitude >= 10000 or magnitude < 0.01):
+            return f"{value:.2g}"
+        return f"{value:g}"
+
+    def redraw(self):
+        canvas = self.canvas
+        canvas.delete("all")
+        width = max(canvas.winfo_width(), 390)
+        height = max(canvas.winfo_height(), 260)
+        left, top, right, bottom = 72, 18, width - 18, height - 52
+
+        if self.points:
+            x_values = [point[0] for point in self.points]
+            y_values = [point[1] for point in self.points]
+            x_min, x_max, x_ticks = self.axis_ticks(
+                min(x_values), max(x_values)
+            )
+            y_min, y_max, y_ticks = self.axis_ticks(
+                min(y_values), max(y_values)
+            )
+        else:
+            x_min, x_max, x_ticks = self.axis_ticks(0.0, 1.0)
+            y_min, y_max, y_ticks = self.axis_ticks(0.0, 1.0)
+
+        def x_pixel(value):
+            return left + (value - x_min) * (right - left) / (x_max - x_min)
+
+        def y_pixel(value):
+            return bottom - (value - y_min) * (bottom - top) / (y_max - y_min)
+
+        grid_color = "#E7DDD3"
+        for tick in x_ticks:
+            pixel = x_pixel(tick)
+            canvas.create_line(pixel, top, pixel, bottom, fill=grid_color)
+            canvas.create_text(
+                pixel,
+                bottom + 14,
+                text=self.format_tick(tick),
+                fill="#6E5A4D",
+                anchor="n",
+            )
+        for tick in y_ticks:
+            pixel = y_pixel(tick)
+            canvas.create_line(left, pixel, right, pixel, fill=grid_color)
+            canvas.create_text(
+                left - 7,
+                pixel,
+                text=self.format_tick(tick),
+                fill="#6E5A4D",
+                anchor="e",
+            )
+
+        canvas.create_line(left, top, left, bottom, fill="#4A2E1D", width=1)
+        canvas.create_line(left, bottom, right, bottom, fill="#4A2E1D", width=1)
+        canvas.create_text(
+            (left + right) / 2,
+            height - 12,
+            text=self.x_label,
+            fill="#4A2E1D",
+        )
+        canvas.create_text(
+            14,
+            (top + bottom) / 2,
+            text=self.y_label,
+            angle=90,
+            fill="#4A2E1D",
+        )
+        if not self.points:
+            canvas.create_text(
+                (left + right) / 2,
+                (top + bottom) / 2,
+                text="No valid curve data",
+                fill="#7A604F",
+            )
+            return
+
+        def project(point):
+            x_value, y_value = point
+            return x_pixel(x_value), y_pixel(y_value)
+
+        projected = [project(point) for point in self.points]
+        if len(projected) > 1:
+            coordinates = [value for point in projected for value in point]
+            canvas.create_line(*coordinates, fill="#C96D3C", width=2)
+        for x_pixel, y_pixel in projected:
+            canvas.create_oval(
+                x_pixel - 3,
+                y_pixel - 3,
+                x_pixel + 3,
+                y_pixel + 3,
+                fill="#C96D3C",
+                outline="#4A2E1D",
+            )
+
+
 class TorqueCurveTable(ttk.Frame):
     def __init__(self, parent, torque_curve: List[carla.Vector2D]):
         super().__init__(parent)
@@ -603,10 +799,18 @@ class TorqueCurveTable(ttk.Frame):
         self.treeview.bind("<Delete>", self.delete_selected)
 
 
-        self.treeview.pack(side="left", fill="both", expand=True)
-
         self.button_frame = ttk.Frame(self.table_frame)
-        self.button_frame.pack(side="right", fill="y", padx=(10, 0))
+        self.treeview.grid(row=0, column=0, sticky="nsew")
+        self.button_frame.grid(row=0, column=1, sticky="ns", padx=(10, 12))
+        self.preview = CurvePreview(
+            self.table_frame,
+            "RPM",
+            "Torque [N·m]",
+        )
+        self.preview.grid(row=0, column=2, sticky="nsew")
+        self.table_frame.grid_columnconfigure(0, weight=0)
+        self.table_frame.grid_columnconfigure(2, weight=1)
+        self.table_frame.grid_rowconfigure(0, weight=1)
 
         self.up_button = ttk.Button(self.button_frame, text="▲", command=self.move_up)
         self.up_button.pack(side="top", pady=(0, 5))
@@ -625,9 +829,25 @@ class TorqueCurveTable(ttk.Frame):
             command=self.delete_selected,
         )
         self.remove_point_button.pack(side="top")
+        self._refresh_plot()
+
+    def _curve_rows(self):
+        return [
+            (
+                self.treeview.set(item, "RPM"),
+                self.treeview.set(item, "Torque"),
+            )
+            for item in self.treeview.get_children()
+            if item != self.add_button
+        ]
+
+    def _refresh_plot(self):
+        if hasattr(self, "preview"):
+            self.preview.update_points(self._curve_rows())
 
     def add_point(self, point):
         item = self.treeview.insert("", self.treeview.index(self.add_button), values=(point[0], point[1]))
+        self._refresh_plot()
         return item
 
     def add_default_point(self):
@@ -678,6 +898,7 @@ class TorqueCurveTable(ttk.Frame):
                 return
             self.treeview.set(row, column, new_value)
             entry.destroy()
+            self._refresh_plot()
 
         entry.bind("<Return>", save)
         entry.bind("<FocusOut>", save)
@@ -693,6 +914,7 @@ class TorqueCurveTable(ttk.Frame):
             if item == self.add_button:
                 continue
             self.treeview.delete(item)
+        self._refresh_plot()
 
     def move_up(self, event=None):
         selected = self.treeview.selection()
@@ -755,7 +977,7 @@ class SteeringCurveTable(ttk.Frame):
 
         columns = ("Speed", "Steering Angle")
         self.treeview = ttk.Treeview(self.table_frame, columns=columns, show="headings", height=10, style="Treeview", selectmode="browse")
-        self.treeview.heading("Speed", text="Speed (m/s)")
+        self.treeview.heading("Speed", text="Speed (km/h)")
         self.treeview.heading("Steering Angle", text="Steer Scale")
         self.treeview.column("Speed", width=140, minwidth=100, anchor="center")
         self.treeview.column(
@@ -774,10 +996,18 @@ class SteeringCurveTable(ttk.Frame):
         self.treeview.bind("<Delete>", self.delete_selected)
 
 
-        self.treeview.pack(side="left", fill="both", expand=True)
-
         self.button_frame = ttk.Frame(self.table_frame)
-        self.button_frame.pack(side="right", fill="y", padx=(10, 0))
+        self.treeview.grid(row=0, column=0, sticky="nsew")
+        self.button_frame.grid(row=0, column=1, sticky="ns", padx=(10, 12))
+        self.preview = CurvePreview(
+            self.table_frame,
+            "Speed [km/h]",
+            "Maximum steer scale",
+        )
+        self.preview.grid(row=0, column=2, sticky="nsew")
+        self.table_frame.grid_columnconfigure(0, weight=0)
+        self.table_frame.grid_columnconfigure(2, weight=1)
+        self.table_frame.grid_rowconfigure(0, weight=1)
 
         self.up_button = ttk.Button(self.button_frame, text="▲", command=self.move_up)
         self.up_button.pack(side="top", pady=(0, 5))
@@ -796,9 +1026,25 @@ class SteeringCurveTable(ttk.Frame):
             command=self.delete_selected,
         )
         self.remove_point_button.pack(side="top")
+        self._refresh_plot()
+
+    def _curve_rows(self):
+        return [
+            (
+                self.treeview.set(item, "Speed"),
+                self.treeview.set(item, "Steering Angle"),
+            )
+            for item in self.treeview.get_children()
+            if item != self.add_button
+        ]
+
+    def _refresh_plot(self):
+        if hasattr(self, "preview"):
+            self.preview.update_points(self._curve_rows())
 
     def add_point(self, point):
         item = self.treeview.insert("", self.treeview.index(self.add_button), values=(point[0], point[1]))
+        self._refresh_plot()
         return item
 
     def add_default_point(self):
@@ -849,6 +1095,7 @@ class SteeringCurveTable(ttk.Frame):
                 return
             self.treeview.set(row, column, new_value)
             entry.destroy()
+            self._refresh_plot()
 
         entry.bind("<Return>", save)
         entry.bind("<FocusOut>", save)
@@ -864,6 +1111,7 @@ class SteeringCurveTable(ttk.Frame):
             if item == self.add_button:
                 continue
             self.treeview.delete(item)
+        self._refresh_plot()
 
     def move_up(self, event=None):
         selected = self.treeview.selection()

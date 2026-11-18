@@ -1,5 +1,9 @@
 # Architektura CARLA Simulator Manager
 
+> Dokument uzupełniający ze snapshotu przed końcowymi korektami. Kanoniczny,
+> zweryfikowany opis bieżącego kodu znajduje się w
+> [../ARCHITECTURE.md](../ARCHITECTURE.md). W razie różnicy ma on pierwszeństwo.
+
 ## Zakres dokumentu
 
 Dokument opisuje stan kodu źródłowego przed końcowymi testami E2E w listopadzie 2026 r. Jego źródłem jest implementacja, a nie wcześniejsze raporty. Szczegóły modułów, komunikacji i danych znajdują się odpowiednio w [MODULES.md](MODULES.md), [CARLA_COMMUNICATION.md](CARLA_COMMUNICATION.md), [DATA_FLOW.md](DATA_FLOW.md) i [FEATURES.md](FEATURES.md).
@@ -37,7 +41,8 @@ Jedynym punktem wejścia jest `app.py`. Jego blok `if __name__ == "__main__"` wy
 | Scenariusze | JSON ze standardowej biblioteki, YAML przez PyYAML |
 | Modele danych | mutowalne modele runtime z `models.actors` oraz `dataclasses` z `models.scenarios` |
 
-Plik `requirements.txt` deklaruje obecnie tylko PyYAML i Pillow. Kod importuje również m.in. CARLA, NumPy, Matplotlib, Pygame i Pygments; sposób ich instalacji nie jest kompletnie opisany w konfiguracji projektu.
+Plik `requirements.txt` zawiera niewersjonowaną listę pakietów, a wpis CARLA jest
+zakomentowaną ścieżką lokalną. Szczegóły opisują główny README i INSTALLATION.
 
 ## Ogólna architektura
 
@@ -52,7 +57,7 @@ flowchart LR
     CC <--> DS["DataStorage\nstan, rejestry, kolejki"]
     DS -->|kolejki zdarzeń| GUI
     GUI -->|polling Tk.after| DS
-    CC --> SM["Scenario Management\nscenarios/"]
+    CC --> SM["Configuration Management\nscenarios/"]
     CC --> RT["Runtime handlers\nmovement / simulation / scenarios"]
     CC --> SIM["simulation.manager\nsimulation.dashboard"]
     CC --> MAP[MapPreviewGenerator]
@@ -92,9 +97,9 @@ Obiekt nie jest trwałą bazą danych. Po rozłączeniu `Manager` tworzy nową i
 
 - `scenarios/` jest pakietem synchronizacji, klasyfikacji, adopcji, walidacji, zapisu, preflight, czyszczenia i odtwarzania scenariusza.
 - `movement.runtime`, `simulation.runtime` i `scenarios.runtime` zawierają wykonawcze handlery dawniej zdefiniowane bezpośrednio w `CarlaController`; kontroler zachowuje stabilne publiczne API i routing.
-- `simulation.manager` implementuje maszynę stanów sterowania tickami i walidację `WorldSettings`, a `simulation.dashboard` buduje okresowe migawki monitoringu.
+- `simulation.manager` implementuje maszynę stanów sterowania tickami i walidację `WorldSettings`, a `simulation.dashboard` buduje okresowe migawki monitoringu oraz mierzy postęp klatek serwera względem zegara monotonicznego.
 - `movement.session` koordynuje jedną sesję Movement Control i otrzymuje fabrykę okna z `Manager`; nie importuje konkretnego widoku. Modele i logika liściowa pozostają w `movement.vehicle`, `movement.walker` i `movement.destination`.
-- `preview.movement` zawiera proces Pygame, publikację ramek oraz wygładzanie sterowania manualnego.
+- `preview.movement` zawiera proces Pygame, publikację ramek, jednoelementowy kanał telemetrii HUD oraz wygładzanie sterowania manualnego.
 - `preview.spectator` i `preview.spectator_controls` realizują niezależne okno obserwatora z własnym klientem CARLA.
 - `preview.sensor_buffers` przechowuje thread-safe migawki sensorów bez Tkinter; okna odświeżające widgety znajdują się w `gui.windows.sensor_preview`.
 - `preview.map` generuje i buforuje obrazy OpenDRIVE; nowe pliki trafiają do `resources/maps/generated/`, a dotychczasowy `images/maps/generated/` jest odczytywany jako lokalizacja zgodności. Dostarczane obrazy znajdują się w `resources/maps/bundled/`.
@@ -124,4 +129,7 @@ Callbacki sensorów CARLA nie modyfikują widgetów. Zapisują dane do buforów 
 
 ## Granice dokumentacji
 
-Nie uruchamiano serwera CARLA ani rzeczywistego GUI. Po usunięciu warstwy legacy w etapie 4B.10 zestaw obejmuje 316 testów bez serwera; wynik bieżącej regresji i probe `multiprocessing.spawn` opisano w dokumentacji testów. Historyczne założenia i uzasadnienia, których nie można potwierdzić kodem, zachowano w [`legacy/`](legacy/) do ręcznego przeglądu; nie są one źródłem prawdy o bieżącej implementacji.
+Nie uruchamiano serwera CARLA ani rzeczywistego GUI podczas tamtego przeglądu.
+Liczba 316 dotyczyła wcześniejszego snapshotu; bieżący stan testów opisuje
+[`../TESTING.md`](../TESTING.md). Historyczne założenia zachowano w
+[`legacy/`](legacy/).

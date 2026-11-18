@@ -2,10 +2,16 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 from PIL import Image
 
-from preview.map import MapImageTransform, MapPreviewCache, MapPreviewGenerator
+from preview.map import (
+    MapImageTransform,
+    MapPreviewCache,
+    MapPreviewGenerator,
+    user_cache_root,
+)
 
 
 class FakeWaypoint:
@@ -214,16 +220,66 @@ class MapPreviewCacheTests(unittest.TestCase):
         self.assertNotIn("/", first.name)
 
     def test_default_cache_path_is_independent_from_working_directory(self):
-        cache = MapPreviewCache()
         project_root = Path(__file__).resolve().parents[2]
+        user_cache = Path(self.temporary_directory.name) / "user-cache"
+        with mock.patch("preview.map.user_cache_root", return_value=user_cache):
+            cache = MapPreviewCache()
 
         self.assertEqual(
             cache.directory,
-            project_root / "resources" / "maps" / "generated",
+            user_cache / "maps" / "generated",
         )
         self.assertEqual(
             cache.legacy_directories,
-            (project_root / "images" / "maps" / "generated",),
+            (
+                project_root / "resources" / "maps" / "generated",
+                project_root / "images" / "maps" / "generated",
+            ),
+        )
+
+    def test_user_cache_root_uses_windows_local_appdata(self):
+        root = user_cache_root(
+            platform_name="win32",
+            environ={"LOCALAPPDATA": "C:/Users/Test/AppData/Local"},
+            home=Path("C:/Users/Test"),
+        )
+
+        self.assertEqual(
+            Path("C:/Users/Test/AppData/Local/CARLA Simulator Manager/Cache"),
+            root,
+        )
+
+    def test_user_cache_root_uses_xdg_and_linux_fallback(self):
+        self.assertEqual(
+            Path("/tmp/test-cache/carla-simulator-manager"),
+            user_cache_root(
+                platform_name="linux",
+                environ={"XDG_CACHE_HOME": "/tmp/test-cache"},
+                home=Path("/home/test"),
+            ),
+        )
+        self.assertEqual(
+            Path("/home/test/.cache/carla-simulator-manager"),
+            user_cache_root(
+                platform_name="linux",
+                environ={"XDG_CACHE_HOME": "relative/cache"},
+                home=Path("/home/test"),
+            ),
+        )
+
+    def test_user_cache_root_survives_missing_profile_environment(self):
+        with (
+            mock.patch("preview.map.Path.home", side_effect=RuntimeError),
+            mock.patch("preview.map.tempfile.gettempdir", return_value="C:/Temp"),
+        ):
+            root = user_cache_root(
+                platform_name="win32",
+                environ={},
+            )
+
+        self.assertEqual(
+            Path("C:/Temp/CARLA Simulator Manager/Cache"),
+            root,
         )
 
 

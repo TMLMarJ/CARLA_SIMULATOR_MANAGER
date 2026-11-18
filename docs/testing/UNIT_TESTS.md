@@ -1,5 +1,9 @@
 # Testy jednostkowe
 
+> Dane 33/316 oraz opisane wyniki dotyczą wcześniejszego snapshotu. Bieżąca
+> statyczna inwentaryzacja i status bez uruchamiania pełnego zestawu znajdują się
+> w [../TESTING.md](../TESTING.md).
+
 ## Framework i zakres
 
 Projekt używa `unittest` ze standardowej biblioteki Pythona oraz `unittest.mock`. Zestaw zawiera 33 pliki testowe i 316 unikalnych metod `test_*`.
@@ -146,7 +150,7 @@ Dwa testy ruchu używają setupu z `WalkerControlTests`. Importują teraz moduł
 Aktualny, niepowielany katalog testów live znajduje się w
 [MANUAL_E2E_CHECKLIST.md](MANUAL_E2E_CHECKLIST.md). Obejmuje BasicAgent,
 Maximum/Adaptive speed, lifecycle mapy, przejścia trybów, reconnect,
-managed/external actors, Scenario Save/Load i współpracę wielu klientów.
+managed/external actors, Configuration Save/Load i współpracę wielu klientów.
 Testy jednostkowe z fake'ami nie zaliczają tych przypadków.
 
 ## Znane ograniczenia organizacji

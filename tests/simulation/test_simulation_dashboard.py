@@ -304,6 +304,23 @@ class DashboardUpdateTests(unittest.TestCase):
             "Stopped",
             self.database.application_status["controller_thread_status"],
         )
+        self.assertEqual([], list(self.monitor.fps_tracker.samples))
+
+    def test_fps_history_resets_for_disconnect_and_new_episode(self):
+        self.monitor.reset_world(self.database, self.world)
+        self.update(force=True)
+        self.clock.value = 0.25
+        self.world.snapshot = FakeSnapshot(frame=47)
+        self.update(force=True)
+        self.assertEqual(20.0, self.database.simulation_snapshot["simulation_fps"])
+
+        self.monitor.disconnect(self.database)
+        self.assertEqual([], list(self.monitor.fps_tracker.samples))
+        self.monitor.reset_world(
+            self.database,
+            FakeWorld(snapshot=FakeSnapshot(frame=1)),
+        )
+        self.assertEqual([], list(self.monitor.fps_tracker.samples))
 
     def test_reconnect_replaces_old_world_data_with_a_new_revision(self):
         self.monitor.reset_world(self.database, self.world)

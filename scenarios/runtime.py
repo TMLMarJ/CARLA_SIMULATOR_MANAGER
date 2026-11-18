@@ -1,6 +1,7 @@
 import carla
 import time
 
+from core.contracts import RuntimeContext
 from models.scenarios import ActorCategory
 from scenarios.adoption import ActorAdoptionReport, AdoptionStatus
 from scenarios.cleaner import StaleClearPlanError, WorldClearReport
@@ -34,11 +35,13 @@ class ScenarioRuntime:
     def _handle_scenario_runtime_command(self, cmd, data, world, blueprint_library):
         if cmd == "sync_world":
             try:
-                self._perform_world_sync(
+                world, blueprint_library = self._refresh_world_from_server(
                     world,
+                    blueprint_library,
                     reason=(data or "manual"),
                 )
             except Exception as error:
+                self.world_transition_event.clear()
                 self.dashboard_monitor.record_error(error)
                 self.database.scenario_event_queue.put((
                     "world_sync_error",
@@ -382,6 +385,194 @@ class ScenarioRuntime:
                 self._finish_clear_operation()
         return world, blueprint_library
 
+    def _refresh_world_from_server(self, world, blueprint_library,
+                                   reason="manual"):
+        """Refresh inventory or rebuild all state when CARLA changed episode."""
+        current_world = self.client.get_world()
+        current_world_id = self._world_id(current_world)
+        if current_world_id is None:
+            raise RuntimeError(
+                "CARLA returned a world without a valid episode ID."
+            )
+        with self.database.lock:
+            previous_world_id = getattr(self.database, "world_id", None)
+
+        if current_world_id == previous_world_id:
+            report = self._perform_world_sync(
+                current_world,
+                reason=reason,
+                publish=False,
+            )
+            self._publish_refresh_report(
+                report,
+                current_world,
+                previous_world_id,
+                episode_changed=False,
+            )
+            return current_world, blueprint_library
+
+        # Read every RPC-dependent value first.  An RPC error must leave the
+        # still-visible local state intact instead of installing half a world.
+        snapshot = None
+        for _attempt in range(3):
+            snapshot = self.world_service.capture(
+                self.client,
+                current_world,
+                self.simulation_manager,
+            )
+            confirmed_world = self.client.get_world()
+            confirmed_world_id = self._world_id(confirmed_world)
+            if confirmed_world_id is None:
+                raise RuntimeError(
+                    "CARLA returned a world without a valid episode ID."
+                )
+            if confirmed_world_id == snapshot["world_id"]:
+                break
+            current_world = confirmed_world
+        else:
+            raise RuntimeError(
+                "CARLA world episode kept changing during synchronization."
+            )
+        return self._rebuild_after_external_episode_change(
+            current_world,
+            snapshot,
+            previous_world_id,
+            reason,
+        )
+
+    def _rebuild_after_external_episode_change(self, current_world, snapshot,
+                                               previous_world_id, reason):
+        self.world_transition_event.set()
+        self.dashboard_monitor.invalidate(
+            self.database,
+            "External world change detected",
+            connection_status="Connected",
+        )
+        self.simulation_manager.stop_local_ticks()
+        self._publish_simulation_control_state(force=True)
+
+        # These routines affect only resources/controllers owned by this GUI.
+        # Old-episode proxies may already be invalid, so teardown is best-effort.
+        for operation in (
+            lambda: self._shutdown_vehicle_controls(
+                disable_autopilot=True,
+                clear_paths=False,
+                strict=False,
+            ),
+            lambda: self._shutdown_walker_ai(strict=False),
+            lambda: self.cleanup_movement_preview(
+                "external_world_changed",
+                strict=False,
+            ),
+            lambda: self.cleanup_sensor_previews(strict=False),
+            lambda: self.cleanup_preview(strict=False),
+        ):
+            try:
+                operation()
+            except Exception as error:
+                self.dashboard_monitor.record_error(error)
+
+        if getattr(self, "traffic_manager_exclusive", False):
+            self._shutdown_exclusive_traffic_manager(
+                "external_world_changed",
+                strict=False,
+            )
+        self._invalidate_traffic_manager_reference()
+        self.sensor_status_errors.clear()
+        self._invalidate_pending_episode_operations()
+        self._invalidate_database_episode_references()
+
+        # Reconnect hints belong to a reconnect baseline, never to a newly
+        # discovered episode.  Keeping them could auto-adopt a reused actor ID.
+        with self.database.lock:
+            self.database.reconnect_actor_hints.clear()
+
+        context = RuntimeContext(
+            client=self.client,
+            database=self.database,
+            world=current_world,
+            blueprint_library=snapshot["blueprint_library"],
+        )
+        settings = self.world_service.install(
+            context,
+            self.simulation_manager,
+            snapshot=snapshot,
+        )
+        self._capture_map_infrastructure(current_world)
+        self.dashboard_monitor.reset_world(
+            self.database,
+            current_world,
+            "External world change",
+        )
+        report = self._perform_world_sync(
+            current_world,
+            reason=reason,
+            publish=False,
+        )
+        self.database.simulation_event_queue.put((
+            "simulation_settings_loaded",
+            settings,
+        ))
+        self._publish_simulation_control_state(force=True)
+        self._queue_map_preview_generation(current_world)
+        self._publish_refresh_report(
+            report,
+            current_world,
+            previous_world_id,
+            episode_changed=True,
+            map_name=snapshot["map_name"],
+        )
+        self.world_transition_event.clear()
+        return current_world, context.blueprint_library
+
+    def _invalidate_pending_episode_operations(self):
+        """Discard plans whose actor IDs and world token are now stale."""
+        invalidated_load = False
+        with self.scenario_operation_lock:
+            invalidated_load = self.active_load_plan is not None
+            self.active_load_plan = None
+            self.active_clear_plan = None
+            self.load_execution_queued = False
+            self.clear_execution_queued = False
+            if self.scenario_operation_kind in (
+                "load_preflight", "load", "clear_preflight", "clear"
+            ):
+                invalidated_load = invalidated_load or (
+                    self.scenario_operation_kind in ("load_preflight", "load")
+                )
+                self.scenario_operation_pending = False
+                self.scenario_operation_kind = None
+        if invalidated_load:
+            self.database.scenario_event_queue.put((
+                "scenario_load_plan_invalidated",
+                {
+                    "reason": (
+                        "The CARLA world episode changed in another client."
+                    ),
+                },
+            ))
+
+    def _publish_refresh_report(self, report, world, previous_world_id,
+                                episode_changed, map_name=None):
+        report = dict(report)
+        with self.database.lock:
+            report["world_generation"] = self.database.world_generation
+        if map_name is None:
+            try:
+                map_name = str(world.get_map().name)
+            except (AttributeError, RuntimeError, TypeError):
+                map_name = ""
+        report.update({
+            "episode_changed": bool(episode_changed),
+            "previous_world_id": previous_world_id,
+            "world_id": self._world_id(world),
+            "map_name": map_name,
+        })
+        self.database.scenario_event_queue.put((
+            "world_sync_completed",
+            report,
+        ))
+
     def _collect_internal_actor_ids(self, include_map_infrastructure=True):
         internal_actor_ids = set()
         for actor in (
@@ -424,6 +615,11 @@ class ScenarioRuntime:
             self.stop_sensor_preview_actor(sensor_id)
         self._service_dashboard(world, force=True)
         report_data = report.to_dict()
+        with self.database.lock:
+            report_data["world_generation"] = (
+                self.database.world_generation
+            )
+        report_data["episode_changed"] = False
         if publish:
             self.database.scenario_event_queue.put((
                 "world_sync_completed",

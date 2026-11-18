@@ -2,10 +2,23 @@
 
 Dokumentacja użytkowa: [README](../README.md) oraz [instalacja](../INSTALLATION.md).
 
-Te dwa pliki oraz dokumenty wymienione poniżej są źródłem prawdy o aktualnym
-kodzie. Raporty etapowe w katalogu głównym (np. `BASIC_AGENT_STAGE*.md` i
-`VEHICLE_DESTINATION_STAGE*.md`) zachowują historię implementacji, ale mogą
-opisywać wcześniejsze wartości domyślne i nie są instrukcją uruchomieniową.
+Dokumenty kanoniczne bieżącego kodu roboczego:
+
+- [Architektura](ARCHITECTURE.md)
+- [Komunikacja z CARLA](CARLA_COMMUNICATION.md)
+- [Funkcjonalności GUI](GUI_FUNCTIONALITIES.md)
+- [Configuration Management](SCENARIO_MANAGEMENT.md)
+- [Movement Control](MOVEMENT_CONTROL.md)
+- [Audyt kompatybilności Linux](implementation/LINUX_COMPATIBILITY_AUDIT.md)
+- [Instalacja Linux — wymaga smoke testu środowiska](LINUX_SETUP.md)
+- [Raport implementacji Windows/Linux](implementation/LINUX_COMPATIBILITY_IMPLEMENTATION.md)
+- [Testowanie](TESTING.md)
+- [Materiał techniczny do pracy inżynierskiej](thesis/THESIS_TECHNICAL_REFERENCE.md)
+- [Raport przeglądu](../DOCUMENTATION_REVIEW_REPORT.md)
+
+W razie rozbieżności dokumenty kanoniczne i aktualny kod mają pierwszeństwo.
+Raporty etapowe zachowują historię implementacji, ale mogą opisywać wcześniejsze
+wartości domyślne i nie są instrukcją uruchomieniową.
 
 ## Aktualna dokumentacja architektury
 
@@ -35,3 +48,6 @@ Historyczne dokumenty projektowe są zachowane w [archiwum decyzji](architecture
 - [Katalog testów](../tests/)
 
 Workflow projektu pozostaje w [WORKFLOW.md](../WORKFLOW.md).
+
+Repozytorium nie zawiera obecnie arkusza `.xlsx`/`.xls`. Historyczne raporty z
+celowanych przebiegów nie są wynikiem manualnych E2E.

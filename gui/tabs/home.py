@@ -1,9 +1,12 @@
 import tkinter as tk
-from tkinter import ttk
-
-import messagebox
+from tkinter import messagebox, ttk
 
 from gui.widgets.dashboard import SimulationDashboardFrame
+from gui.widgets.scrolling import (
+    bind_mousewheel,
+    unbind_mousewheel,
+    vertical_scroll_units,
+)
 
 class CustomMainViewFrame(ttk.Frame):
     def __init__(self, parent, controller):
@@ -41,6 +44,7 @@ class CustomMainViewFrame(ttk.Frame):
         self.canvas.bind("<Configure>", self._resize_content)
         self.canvas.bind("<Enter>", self._bind_mousewheel)
         self.canvas.bind("<Leave>", self._unbind_mousewheel)
+        self._mousewheel_bindings = {}
 
         self.connection_frame = ConnectionFrame(self.content_frame, self.controller)
         self.connection_frame.grid(row=0, column=0, padx=5, pady=5, sticky="nw")
@@ -71,13 +75,30 @@ class CustomMainViewFrame(ttk.Frame):
         self.canvas.itemconfigure(self.content_window, width=event.width)
 
     def _bind_mousewheel(self, event=None):
-        self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+        if self._mousewheel_bindings:
+            return
+        self._mousewheel_bindings = bind_mousewheel(
+            self.winfo_toplevel(),
+            self._on_mousewheel,
+        )
 
     def _unbind_mousewheel(self, event=None):
-        self.canvas.unbind_all("<MouseWheel>")
+        if not self._mousewheel_bindings:
+            return
+        unbind_mousewheel(
+            self.winfo_toplevel(),
+            self._mousewheel_bindings,
+        )
+        self._mousewheel_bindings = {}
 
     def _on_mousewheel(self, event):
-        self.canvas.yview_scroll(int(-event.delta / 120), "units")
+        units = vertical_scroll_units(event)
+        if units:
+            self.canvas.yview_scroll(units, "units")
+
+    def destroy(self):
+        self._unbind_mousewheel()
+        super().destroy()
 
 class ConnectionFrame(ttk.Frame):
     def __init__(self, parent, manager):

@@ -1,5 +1,9 @@
 # Moduły i zależności
 
+> Katalog modułów ze wcześniejszego snapshotu. Kanoniczny podział i aktualne
+> odniesienia do kodu znajdują się w [../ARCHITECTURE.md](../ARCHITECTURE.md) i
+> [../THESIS_TECHNICAL_REFERENCE.md](../thesis/THESIS_TECHNICAL_REFERENCE.md).
+
 ## Zakres
 
 Tabela opisuje moduły zawierające logikę produkcyjną po zakończeniu etapu 4B.10. Pliki z `tests/` nie są częścią tej mapy. Nazwy klas i funkcji pochodzą z aktualnego kodu; usunięte ścieżki legacy pozostają opisane historycznie w [REFACTOR_PLAN.md](legacy/REFACTOR_PLAN.md).
@@ -66,7 +70,7 @@ Usunięty pakiet `gui_contents/` nie jest już częścią grafu importów; wszys
 | `simulation/runtime.py` | `SimulationRuntime` | Handlery kontroli ticków, scheduler, okresowa obsługa dashboardu i publikacja stanu; nie tworzy własnej pętli ani wątku. |
 | `preview/map.py` | `MapPreviewCache`, `MapPreviewGenerator` | Kanoniczne generowanie obrazu z waypointów OpenDRIVE i atomowy cache PNG; zapis do `resources/maps/generated/` oraz odczyt zgodności z `images/maps/generated/`. |
 
-## Scenario Management
+## Configuration Management
 
 | Moduł | Najważniejsze elementy | Odpowiedzialność i zależności |
 |---|---|---|

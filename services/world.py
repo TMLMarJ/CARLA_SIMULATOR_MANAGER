@@ -7,6 +7,27 @@ from utilities.map_names import maps_equal
 
 class WorldService:
     @staticmethod
+    def capture(client, world, simulation_manager):
+        """Read a complete episode snapshot before replacing local state."""
+        world_id = int(world.id)
+        blueprint_library = world.get_blueprint_library()
+        carla_map = world.get_map()
+        settings = simulation_manager.get_current_settings(world)
+        return {
+            "world_id": world_id,
+            "world": world,
+            "map_name": str(carla_map.name),
+            "blueprint_library": blueprint_library,
+            "pedestrian_blueprint_ids": get_pedestrian_blueprint_ids(
+                blueprint_library
+            ),
+            "world_library": client.get_available_maps(),
+            "weather_data": parse_weather_to_dict(world.get_weather()),
+            "spawn_points": carla_map.get_spawn_points(),
+            "simulation_settings": settings,
+        }
+
+    @staticmethod
     def load_with_retry(client, map_name, shutdown_event, attempts=10):
         load_error = None
         validation_error = None
@@ -59,10 +80,16 @@ class WorldService:
         ) from cause
 
     @staticmethod
-    def install(context, simulation_manager):
+    def install(context, simulation_manager, snapshot=None):
         new_world = context.world
-        new_world_id = int(new_world.id)
-        new_blueprint_library = context.blueprint_library
+        snapshot = snapshot or WorldService.capture(
+            context.client,
+            new_world,
+            simulation_manager,
+        )
+        new_world_id = snapshot["world_id"]
+        new_blueprint_library = snapshot["blueprint_library"]
+        context.blueprint_library = new_blueprint_library
         database = context.database
 
         with database.lock:
@@ -77,17 +104,15 @@ class WorldService:
                 int(getattr(database, "world_generation", 0)) + 1
             )
             database.blueprint_lib = new_blueprint_library
-            database.pedestrian_blueprint_ids = (
-                get_pedestrian_blueprint_ids(new_blueprint_library)
-            )
+            database.pedestrian_blueprint_ids = snapshot[
+                "pedestrian_blueprint_ids"
+            ]
         database.sensor_event_queue.put(("sensors_cleared", None))
 
-        new_world_library = context.client.get_available_maps()
-        new_weather_data = parse_weather_to_dict(new_world.get_weather())
-        new_spawn_points = new_world.get_map().get_spawn_points()
-        new_simulation_settings = simulation_manager.get_current_settings(
-            new_world
-        )
+        new_world_library = snapshot["world_library"]
+        new_weather_data = snapshot["weather_data"]
+        new_spawn_points = snapshot["spawn_points"]
+        new_simulation_settings = snapshot["simulation_settings"]
         simulation_manager.settings_changed(
             new_simulation_settings,
             preserve_activity=False,

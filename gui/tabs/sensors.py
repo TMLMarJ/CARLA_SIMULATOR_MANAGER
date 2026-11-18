@@ -4,6 +4,7 @@ from tkinter import messagebox, ttk
 
 import carla
 from gui.widgets.color_picker import ColorPicker
+from gui.widgets.scrolling import bind_mousewheel, vertical_scroll_units
 from gui.windows.sensor_preview import (
     EVENT_SENSOR_TYPES,
     IMAGE_SENSOR_TYPES,
@@ -472,9 +473,10 @@ class AddSensorTop(tk.Toplevel):
                 canvas.configure(scrollregion=canvas.bbox("all"))
             )
         )
-        self.bind("<MouseWheel>", lambda event: canvas.yview_scroll(
-            int(-event.delta / 120), "units"
-        ))
+        bind_mousewheel(
+            self,
+            lambda event: self._scroll_form(canvas, event),
+        )
         canvas.pack(side="left", fill="both", expand=True, padx=(12, 0), pady=12)
         scrollbar.pack(side="right", fill="y", pady=12, padx=(0, 12))
 
@@ -580,6 +582,12 @@ class AddSensorTop(tk.Toplevel):
         ttk.Button(button_frame, text="Cancel", command=self.destroy).pack(side="right")
 
         self._update_attributes()
+
+    @staticmethod
+    def _scroll_form(canvas, event):
+        units = vertical_scroll_units(event)
+        if units:
+            canvas.yview_scroll(units, "units")
 
     def _update_attributes(self, event=None):
         for widget in self.attributes_frame.winfo_children():

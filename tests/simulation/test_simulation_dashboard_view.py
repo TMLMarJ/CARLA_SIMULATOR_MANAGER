@@ -109,6 +109,15 @@ class DashboardPresentationTests(unittest.TestCase):
         self.assertEqual("-", SimulationDashboardFrame.format_timestamp(None))
         self.assertEqual("-", SimulationDashboardFrame.format_timestamp("bad"))
 
+    def test_simulation_fps_is_formatted_independently_of_delta_time(self):
+        formatter = SimulationDashboardFrame.format_simulation_fps
+
+        self.assertEqual("20.0", formatter(20.0))
+        self.assertEqual("0.0", formatter(0.0))
+        self.assertEqual("N/A", formatter(None))
+        self.assertEqual("N/A", formatter(-1.0))
+        self.assertEqual("N/A", formatter(float("nan")))
+
 
 if __name__ == "__main__":
     unittest.main()

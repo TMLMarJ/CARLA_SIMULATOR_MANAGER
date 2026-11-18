@@ -1,5 +1,10 @@
 # Architektura funkcjonalności
 
+> Dokument uzupełniający ze wcześniejszego snapshotu. Aktualne funkcje zakładek
+> opisuje [../GUI_FUNCTIONALITIES.md](../GUI_FUNCTIONALITIES.md), scenariusze
+> [../SCENARIO_MANAGEMENT.md](../SCENARIO_MANAGEMENT.md), a movement
+> [../MOVEMENT_CONTROL.md](../MOVEMENT_CONTROL.md).
+
 ## Main View i połączenie
 
 **Moduły i klasy:** `gui.application.Manager`, `gui.main_view.MainView`, `gui.tabs.home.CustomMainViewFrame`, `ConnectionFrame`, `SpectatorFrame`, `gui.widgets.dashboard.SimulationDashboardFrame`.
@@ -148,7 +153,7 @@ Monitor okresowo buduje:
 
 Wyniki są słownikami przechowywanymi w `DataStorage`; widok renderuje je bez bezpośrednich zapytań do CARLA. Dashboard pokazuje external actors i pozwala rozpocząć Take Ownership. Adoption jest wykonywane przez kontroler po sprawdzeniu runtime identity oraz konfliktów z operacjami scenariusza.
 
-## Scenario Management
+## Configuration Management
 
 **Moduły i klasy:** `ScenarioManager`, `ScenarioCapture`, `ScenarioSerializer`, `ScenarioValidator`, `ScenarioLoader`, `ScenarioRestorer`, `WorldCleaner`, `WorldSynchronizer`, `ActorAdopter` oraz modele z `models.scenarios`. Implementacje domenowe znajdują się w `scenarios.*`.
 
@@ -193,7 +198,7 @@ Zlecenie zawiera `world_id` i nazwę mapy, więc wynik starego epizodu jest odrz
 |---|---|
 | Zmiana mapy | Movement, Spectator, sensory, ghost, scenario plans, dashboard, simulation control, map preview |
 | Usunięcie aktora | sensory potomne, movement session, rejestry i dashboard |
-| Scenario Load/Clear | blokada mutacji, zamknięcie podglądów, selective clear, synchronizacja i odświeżenie GUI |
+| Configuration Load/Clear | blokada mutacji, zamknięcie podglądów, selective clear, synchronizacja i odświeżenie GUI |
 | Rozłączenie | wszystkie zasoby CARLA, procesy podglądu, widoki połączeniowe i `DataStorage` |
 | External actor adoption | rejestr ownership, stan ruchu, tabele Actors i dashboard |
 

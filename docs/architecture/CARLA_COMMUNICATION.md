@@ -1,5 +1,9 @@
 # Komunikacja z serwerem CARLA
 
+> Dokument ze snapshotu sprzed External World Refresh hotfix. Kanoniczny opis,
+> obejmujący `world_id`, `world_generation` i pełną odbudowę po zmianie episode,
+> znajduje się w [../CARLA_COMMUNICATION.md](../CARLA_COMMUNICATION.md).
+
 ## Nawiązywanie połączenia
 
 Użytkownik podaje host i port w `ConnectionFrame`. Wartości domyślne to `127.0.0.1` i `2000`; GUI sprawdza niepusty host oraz port z zakresu 1–65535. `gui.application.Manager.connect_to_carla()` tworzy `CarlaController(database, spectator_status_callback, host, port)`, uruchamia jego wątek metodą `start()` i rozpoczyna polling `connection_queue` przez `after(100, check_connection)`. Kontroler nie przechowuje całego `Manager`; callback zwraca wyłącznie stan i ID kamery Spectatora potrzebne dashboardowi.

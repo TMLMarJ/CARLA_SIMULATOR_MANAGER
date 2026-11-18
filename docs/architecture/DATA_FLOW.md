@@ -1,5 +1,9 @@
 # Przepływ i przechowywanie danych
 
+> Dokument uzupełniający ze wcześniejszego snapshotu. Aktualny przepływ stanu i
+> episode opisują [../ARCHITECTURE.md](../ARCHITECTURE.md) oraz
+> [../CARLA_COMMUNICATION.md](../CARLA_COMMUNICATION.md).
+
 ## Model ogólny
 
 CARLA Server przechowuje bieżący stan świata i aktorów. Aplikacja buduje lokalną projekcję tego stanu w `DataStorage`, wzbogaconą o informacje, których serwer nie dostarcza wprost: nazwy użytkownika, ownership, trwałe `scenario_id`, kompletność konfiguracji oraz stan sterowania GUI.
@@ -152,7 +156,7 @@ Load jest dwuetapowy.
 2. waliduje dokument;
 3. porównuje mapę bieżącą i docelową;
 4. sprawdza dostępność mapy, blueprintów, atrybutów, fizyki i zależności;
-5. ogranicza wejście do wspieranego zakresu managed Scenario Load;
+5. ogranicza wejście do wspieranego zakresu managed Configuration Load;
 6. buduje kolejność topologiczną rodzic–dziecko;
 7. tworzy `ScenarioLoadPlan` z tokenem, `world_id`, statusem, ostrzeżeniami i problemami krytycznymi.
 
